@@ -30,22 +30,54 @@ typedef struct Vertex
 //    1, 3, 2,
 //};
 
+//static const char* vertex_shader_text =
+//"#version 460\n"
+//"layout(location = 0) in vec3 vNorm;\n"
+//"layout(location = 1) in vec3 vPos;\n"
+//"layout(location = 2) in uvec4 vJoints;\n"
+//"layout(location = 3) in vec4 vWeights;\n"
+//"layout(location = 0) uniform mat4 world_txfm;\n"
+//"layout(location = 1) uniform mat4 viewport_txfm;\n"
+//"layout(location = 2) uniform uint preview_joint = 2;\n"
+//"layout(location = 3) uniform mat4 inverse_bone_matrix[20];\n"
+//"layout(location = 4) uniform mat4 bone_matrix[20];\n"
+//"out vec3 norm;\n"
+//"out float joint_color;\n"
+//"void main()\n"
+//"{\n"
+//"    gl_Position = (viewport_txfm * world_txfm * vec4(vPos, 1.0));\n"
+//"    joint_color = 0.0;\n"
+//"    for (int i = 0; i < 4; ++i) { \n"
+//"        //gl_Position += (viewport_txfm * world_txfm * bone_matrix[vJoints[i]] * inverse_bone_matrix[vJoints[i]] * vec4(vPos, 1.0)) * vWeights[i];\n"
+//"    }\n"
+//"    norm = mat3(world_txfm) * vNorm;\n"
+//"}\n";
 static const char* vertex_shader_text =
 "#version 460\n"
 "layout(location = 0) in vec3 vNorm;\n"
 "layout(location = 1) in vec3 vPos;\n"
+"layout(location = 2) in uvec4 vJoints;\n"
+"layout(location = 3) in vec4 vWeights;\n"
 "layout(location = 0) uniform mat4 world_txfm;\n"
 "layout(location = 1) uniform mat4 viewport_txfm;\n"
+"layout(location = 2) uniform uint preview_joint = 1;\n"
 "out vec3 norm;\n"
+"out float joint_color;\n"
 "void main()\n"
 "{\n"
 "    gl_Position = viewport_txfm * world_txfm * vec4(vPos, 1.0);\n"
+"    joint_color = 0.0;\n"
+"    for (int i = 0; i < 4; ++i) { \n"
+"        if (vJoints[i] == preview_joint && vWeights[i] > 0) joint_color = vWeights[i]; \n"
+"    }\n"
 "    norm = mat3(world_txfm) * vNorm;\n"
 "}\n";
+
 
 static const char* fragment_shader_text =
 "#version 460\n"
 "in vec3 norm;\n"
+"in float joint_color;\n"
 "out vec4 fragment;\n"
 "void main()\n"
 "{\n"
@@ -53,6 +85,7 @@ static const char* fragment_shader_text =
 "    float diffuse = max(dot(norm, -sun_dir), 0.0);\n"
 "    float ambient = 0.1;\n"
 "    fragment = vec4((ambient + diffuse) * vec3(1.0, 1.0, 1.0), 1.0);\n"
+"    //fragment = vec4(vec3(joint_color), 1.0);\n"
 "}\n";
 
 
@@ -72,6 +105,18 @@ struct mat4x4 mat4x4_rot_x(float angle) {
     };
 }
 
+struct mat4x4 mat4x4_rot_y(float angle) {
+    float c = cos(angle);
+    float s = sin(angle);
+
+    return (struct mat4x4) {
+          c, 0.0,   -s, 0.0,
+        0.0, 1.0,  0.0, 0.0,
+          s, 0.0,    c, 0.0,
+        0.0, 0.0,  0.0, 1.0,
+    };
+}
+
 struct mat4x4 mat4x4_rot_z(float angle) {
     float c = cos(angle);
     float s = sin(angle);
@@ -83,6 +128,33 @@ struct mat4x4 mat4x4_rot_z(float angle) {
         0.0,  0.0, 0.0, 1.0,
     };
 }
+
+struct mat4x4 mat4x4_from_quat(float* quat) {
+    float x = quat[0];
+    float y = quat[1];
+    float z = quat[2];
+    float w = quat[3];
+
+    float x2 = x * x;
+    float y2 = y * y;
+    float z2 = z * z;
+    float w2 = w * w;
+
+    float xy = 2.0f * x * y;
+    float xz = 2.0f * x * z;
+    float xw = 2.0f * x * w;
+    float yz = 2.0f * y * z;
+    float yw = 2.0f * y * w;
+    float zw = 2.0f * z * w;
+
+    return (struct mat4x4) {
+        w2 + x2 - y2 - z2, xy - zw, xz + yw, 0.0f,
+        xy + zw, w2 - x2 + y2 - z2, yz - xw, 0.0f,
+        xz - yw, yz + xw, w2 - x2 - y2 + z2, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f
+    };
+}
+
 
 struct mat4x4 mat4x4_translate(float x, float y, float z) {
     return (struct mat4x4) {
@@ -123,6 +195,16 @@ float vec4_dot(struct vec4 a, struct vec4 b) {
            a.data[1] * b.data[1] +
            a.data[2] * b.data[2] +
            a.data[3] * b.data[3];
+}
+
+struct mat4x4 mat4x4_scale(float x, float y, float z) {
+    return (struct mat4x4) {
+          x,  0.0, 0.0, 0.0,
+        0.0,    y, 0.0, 0.0,
+        0.0,  0.0,   z, 0.0,
+        0.0,  0.0, 0.0, 1.0,
+    };
+
 }
 
 struct mat4x4 mat4x4_mul(struct mat4x4 a, struct mat4x4 b) {
@@ -187,7 +269,7 @@ struct buffer load_file(const char* path, struct buffer* buf) {
     FILE* f = fopen(path, "rb");
     assert(f);
     ssize_t read_len = fread(buf->data, 1, buf->len, f);
-    assert(read_len >= 0);
+    assert(read_len > 0);
     fclose(f);
 
     struct buffer ret = {buf->data, read_len};
@@ -196,22 +278,54 @@ struct buffer load_file(const char* path, struct buffer* buf) {
     return ret;
 }
 
+struct node {
+    float translation[3];
+    float rotation[4];
+    float scale[3];
+    uint32_t parent;
+};
+
+enum animation_type {
+    animation_type_translation = 0,
+    animation_type_rotation = 1,
+    animation_type_scale = 2,
+};
+
+struct animation_channel {
+    uint32_t target;
+    enum animation_type animation_type;
+    size_t num_timesteps;
+    float* times;
+    float* data;
+};
+
+int animation_channel_components(enum animation_type animation_type) {
+    switch (animation_type) {
+        case animation_type_translation:
+        case animation_type_scale:
+            return 3;
+        case animation_type_rotation:
+            return 4;
+    }
+}
+
 struct model {
     GLuint vao;
     size_t num_indices;
+    struct node* nodes;
+    size_t num_nodes;
+    struct animation_channel* animation_channels;
+    size_t num_animations;
 };
-struct model load_model(void) {
-    char buf_data[4096];
-    struct buffer buf = { buf_data, 4096 };
+
+struct model load_model(struct buffer buf) {
 
     struct buffer positions_buf = load_file("positions.bin", &buf);
     struct buffer normals_buf = load_file("normals.bin", &buf);
     struct buffer index_buf = load_file("indices.bin", &buf);
-
-    float* normals = (float*)normals_buf.data;
-    for (int i = 0; i < normals_buf.len / 4; i += 3) {
-        printf("%f %f %f\n", normals[i], normals[i + 1], normals[i + 2]);
-    }
+    struct buffer nodes_buf = load_file("nodes.bin", &buf);
+    struct buffer vert_joints_buf = load_file("vert_joints.bin", &buf);
+    struct buffer vert_weights_buf = load_file("vert_weights.bin", &buf);
 
     GLuint vertex_array;
     glGenVertexArrays(1, &vertex_array);
@@ -233,16 +347,101 @@ struct model load_model(void) {
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
 
+    GLuint joints_buffer;
+    glGenBuffers(1, &joints_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, joints_buffer);
+    glBufferData(GL_ARRAY_BUFFER, vert_joints_buf.len, vert_joints_buf.data, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(2);
+    glVertexAttribIPointer(2, 4, GL_UNSIGNED_BYTE, 4, 0);
+
+    GLuint weights_buffer;
+    glGenBuffers(1, &weights_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, weights_buffer);
+    glBufferData(GL_ARRAY_BUFFER, vert_weights_buf.len, vert_weights_buf.data, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), 0);
+
     GLuint ebo;
     glGenBuffers(1, &ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf.len, index_buf.data, GL_STATIC_DRAW);
 
     glBindVertexArray(0);
-    return (struct model){vertex_array, index_buf.len / 2 };
 
+    // 3 floats translation
+    // 4 floats rotation
+    // 3 floats scale
+    // 1 uint32 parent
+#define ELEMS_PER_NODE (11)
+#define NODE_SIZE (ELEMS_PER_NODE * 4)
+
+    size_t num_nodes = nodes_buf.len / NODE_SIZE;
+    struct node* nodes = malloc(num_nodes * NODE_SIZE);
+
+    float* nodes_float = (float*)nodes_buf.data;
+    uint32_t* nodes_u = (uint32_t*)nodes_buf.data;
+
+    for (int i = 0; i < nodes_buf.len / NODE_SIZE; ++i) {
+        nodes[i].translation[0] = nodes_float[ELEMS_PER_NODE * i];
+        nodes[i].translation[1] = nodes_float[ELEMS_PER_NODE * i + 1];
+        nodes[i].translation[2] = nodes_float[ELEMS_PER_NODE * i + 2];
+        nodes[i].rotation[0] = nodes_float[ELEMS_PER_NODE * i + 3];
+        nodes[i].rotation[1] = nodes_float[ELEMS_PER_NODE * i + 4];
+        nodes[i].rotation[2] = nodes_float[ELEMS_PER_NODE * i + 5];
+        nodes[i].rotation[3] = nodes_float[ELEMS_PER_NODE * i + 6];
+        nodes[i].scale[0] = nodes_float[ELEMS_PER_NODE * i + 7];
+        nodes[i].scale[1] = nodes_float[ELEMS_PER_NODE * i + 8];
+        nodes[i].scale[2] = nodes_float[ELEMS_PER_NODE * i + 9];
+        nodes[i].parent = nodes_u[ELEMS_PER_NODE * i + 10];
+    }
+
+
+    size_t num_animations = 29;
+    struct animation_channel* animations = malloc(num_animations * sizeof(struct animation_channel));
+
+    for (int animation_idx = 0; animation_idx < num_animations; ++animation_idx) {
+        char path_buf[4096];
+        sprintf(path_buf, "animations_%d.bin", animation_idx);
+
+        struct buffer animation_data = load_file(path_buf, &buf);
+        uint32_t target_node = *(uint32_t*)animation_data.data;
+        uint32_t target_path = *(uint32_t*)(animation_data.data + 4);
+        uint32_t num_timesteps = *(uint32_t*)(animation_data.data + 8);
+        uint32_t cursor = 12;
+
+        float* times = malloc(num_timesteps * sizeof(float));
+        for (int i = 0; i < num_timesteps; ++i) {
+            times[i] = *(float*)(animation_data.data + cursor);
+            cursor += 4;
+        }
+
+        int components = 3;
+        if (target_path == animation_type_rotation) {
+            components = 4;
+        }
+
+        float* data = malloc(num_timesteps * components * sizeof(float));
+        for (int i = 0; i < num_timesteps; ++i) {
+            float* start = data + (i * components);
+            for (int j = 0; j < components; ++j) {
+                start[j] = *(float*)(animation_data.data + cursor);
+                cursor += 4;
+            }
+        }
+
+        animations[animation_idx] = (struct animation_channel){
+            target_node,
+            target_path,
+            num_timesteps,
+            times,
+            data,
+        };
+    }
+
+    return (struct model){vertex_array, index_buf.len / 2, nodes, num_nodes, animations, num_animations};
 }
-
 
 GLuint compile_shader(const char* shader_text, GLenum shader_type) {
     const GLuint vertex_shader = glCreateShader(shader_type);
@@ -260,6 +459,114 @@ GLuint compile_shader(const char* shader_text, GLenum shader_type) {
         printf("%*s\n", len, buf);
     }
     return vertex_shader;
+}
+
+GLuint make_bone(void) {
+    GLuint vertex_array;
+    glGenVertexArrays(1, &vertex_array);
+    glBindVertexArray(vertex_array);
+
+    float verts[6] = {
+        0.0, 0.0, 0.0,
+        0.0, 0.1, 0.0,
+    };
+
+    GLuint position_buffer;
+    glGenBuffers(1, &position_buffer);
+    glBindBuffer(GL_ARRAY_BUFFER, position_buffer);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
+
+    return vertex_array;
+}
+
+struct mat4x4 node_world_txfm(struct node* nodes, size_t idx) {
+
+    struct node node = nodes[idx];
+    struct mat4x4 node_txfm = mat4x4_scale(
+            node.scale[0],
+            node.scale[1],
+            node.scale[2]
+    );
+
+    node_txfm = mat4x4_mul(
+            mat4x4_from_quat(node.rotation), node_txfm
+    );
+
+    node_txfm = mat4x4_mul(
+        mat4x4_translate(
+                node.translation[0],
+                node.translation[1],
+                node.translation[2]
+        ),
+        node_txfm
+    );
+
+
+    if (node.parent != UINT32_MAX) {
+        node_txfm = mat4x4_mul(
+                node_world_txfm(nodes, node.parent),
+                node_txfm
+        );
+    }
+
+    return node_txfm;
+}
+
+float lerp(float a, float b, float t) {
+    return a * (1.0 - t) + b * t;
+}
+
+void apply_animation(float time_since_start, struct model* model) {
+    for (int animation_idx = 0; animation_idx < model->num_animations; ++animation_idx) {
+
+        struct animation_channel* channel = &model->animation_channels[animation_idx];
+        float rel_time_since_start = fmod(time_since_start, channel->times[channel->num_timesteps - 1]);
+
+        int last_timestep;
+        // 0, am i bigger? yes? sick
+        for (last_timestep = channel->num_timesteps - 1; last_timestep >= 0; --last_timestep) {
+            if (rel_time_since_start >= channel->times[last_timestep])  break;
+        }
+
+        int next_timestep = last_timestep + 1;
+
+        float out[4];
+        int components = animation_channel_components(channel->animation_type);
+
+        float* last_data = &channel->data[last_timestep * components];
+        float* next_data = &channel->data[next_timestep * components];
+
+        float last_time = channel->times[last_timestep];
+        float next_time = channel->times[next_timestep];
+
+        for (int i = 0; i < components; ++i) {
+            out[i] = lerp(last_data[i], next_data[i], (rel_time_since_start - last_time)/ (next_time - last_time));
+        }
+
+        struct node* node = &model->nodes[channel->target];
+        switch (channel->animation_type) {
+            case animation_type_translation:
+                node->translation[0] = out[0];
+                node->translation[1] = out[1];
+                node->translation[2] = out[2];
+                break;
+            case animation_type_rotation:
+                node->rotation[0] = out[0];
+                node->rotation[1] = out[1];
+                node->rotation[2] = out[2];
+                node->rotation[3] = out[3];
+                break;
+            case animation_type_scale:
+                node->scale[0] = out[0];
+                node->scale[1] = out[1];
+                node->scale[2] = out[2];
+                break;
+
+        }
+    }
 }
 
 int main(void)
@@ -285,7 +592,18 @@ int main(void)
 
     // NOTE: OpenGL error checks have been omitted for brevity
 
-    struct model model = load_model();
+    struct buffer buf = { malloc(10 * 1024 * 1024),  10 * 1024 * 1024};
+    struct model model = load_model(buf);
+
+    for (int i = 0; i < model.num_nodes; ++i) {
+        printf("%f %f %f (%d)\n",
+                model.nodes[i].translation[0],
+                model.nodes[i].translation[1],
+                model.nodes[i].translation[2],
+                model.nodes[i].parent
+            );
+
+    }
 
     const GLuint vertex_shader = compile_shader(vertex_shader_text, GL_VERTEX_SHADER);
     const GLuint fragment_shader = compile_shader(fragment_shader_text, GL_FRAGMENT_SHADER);
@@ -318,10 +636,15 @@ int main(void)
 
     float angle = 0;
 
+    GLuint bone_vao = make_bone();
+
     struct timespec last;
     clock_gettime(CLOCK_MONOTONIC, &last);
+    struct timespec start = last;
 
     glEnable(GL_DEPTH_TEST);
+
+    glLineWidth(5);
 
     while (!glfwWindowShouldClose(window))
     {
@@ -329,6 +652,8 @@ int main(void)
         clock_gettime(CLOCK_MONOTONIC, &now);
 
         float delta_s = diff_time(last, now);
+        apply_animation(diff_time(start, now), &model);
+
         angle += 2.0f * M_PI * delta_s * 0.5;
         angle = fmod(angle, 2 * M_PI);
 
@@ -342,17 +667,34 @@ int main(void)
         glUseProgram(program);
         glBindVertexArray(model.vao);
 
-        struct mat4x4 world_txfm = mat4x4_translate(0, 1.0, 0.0);
-        world_txfm = mat4x4_mul(mat4x4_rot_x(angle), world_txfm);
-        world_txfm = mat4x4_mul(mat4x4_translate(0.0, 0.0, -5.0), world_txfm);
+        struct mat4x4 world_txfm = mat4x4_translate(0, -0.0, 0.0);
+        world_txfm = mat4x4_mul(mat4x4_rot_y(angle), world_txfm);
+        world_txfm = mat4x4_mul(mat4x4_translate(0.0, 0.0, -1.0), world_txfm);
 
         struct mat4x4 viewport_txfm = mat4x4_perspective(0.1, 10.0);
 
+        struct mat4x4 bone_matrices[20];
+        struct mat4x4 inverse_bone_matrices[20];
+        for (int i = 0; i < 20; i++) {
+            inverse_bone_matrices[i] = mat4x4_translate(0, 0, 0);
+            bone_matrices[i] = mat4x4_translate(0, 0, 0);
+        }
+
         glUniformMatrix4fv(0, 1, true, world_txfm.data);
         glUniformMatrix4fv(1, 1, true, viewport_txfm.data);
+        glUniformMatrix4fv(3, 20, true, (void*)&inverse_bone_matrices);
+        glUniformMatrix4fv(4, 20, true, (void*)&bone_matrices);
 
-        //glDrawArrays(GL_TRIANGLES, 0, 6);
         glDrawElements(GL_TRIANGLES, model.num_indices, GL_UNSIGNED_SHORT, 0);
+
+        glBindVertexArray(bone_vao);
+
+        //for (int i = 0; i < model.num_nodes; i++) {
+        //    struct mat4x4 bone_txfm = node_world_txfm(model.nodes, i);
+        //    bone_txfm = mat4x4_mul(world_txfm, bone_txfm);
+        //    glUniformMatrix4fv(0, 1, true, bone_txfm.data);
+        //    glDrawArrays(GL_LINES, 0, 2);
+        //}
 
         glfwSwapBuffers(window);
         glfwPollEvents();

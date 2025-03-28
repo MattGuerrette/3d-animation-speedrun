@@ -6,5 +6,6 @@ pkgs.mkShell {
     clang-tools
     python3
     pyright
+    gdb
   ];
 }
