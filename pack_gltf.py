@@ -86,6 +86,14 @@ def main():
             expected_type = "VEC4" if channel["target"]["path"] == "rotation" else "VEC3"
             dump_accessor_to_f(gltf, data_accessor, f, 5126, expected_type)
 
+    skins = gltf["skins"]
+    with open("joint_info.bin", "wb") as f:
+        f.write(struct.pack('<I', len(skins[0]["joints"])))
+        for joint in skins[0]["joints"]:
+            f.write(struct.pack('<I', joint))
+        dump_accessor_to_f(gltf, skins[0]["inverseBindMatrices"], f, 5126, "MAT4")
+
+
 
 
 if __name__ == '__main__':

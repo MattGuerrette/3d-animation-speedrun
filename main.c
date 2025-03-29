@@ -30,6 +30,29 @@ typedef struct Vertex
 //    1, 3, 2,
 //};
 
+static const char* vertex_shader_text =
+"#version 460\n"
+"layout(location = 0) in vec3 vNorm;\n"
+"layout(location = 1) in vec3 vPos;\n"
+"layout(location = 2) in uvec4 vJoints;\n"
+"layout(location = 3) in vec4 vWeights;\n"
+
+"layout(location = 0) uniform mat4 world_txfm;\n"
+"layout(location = 1) uniform mat4 viewport_txfm;\n"
+"layout(location = 2) uniform uint preview_joint = 2;\n"
+"layout(location = 20) uniform mat4 inverse_bone_matrix[20];\n"
+"layout(location = 40) uniform mat4 bone_matrix[20];\n"
+"out vec3 norm;\n"
+"out float joint_color;\n"
+"void main()\n"
+"{\n"
+"    gl_Position = vec4(0.0);\n"
+"    joint_color = 0.0;\n"
+"    for (int i = 0; i < 4; ++i) { \n"
+"        gl_Position += vWeights[i] * (viewport_txfm * world_txfm * bone_matrix[vJoints[i]] * inverse_bone_matrix[vJoints[i]] * vec4(vPos, 1.0));\n"
+"    }\n"
+"    norm = mat3(world_txfm) * vNorm;\n"
+"}\n";
 //static const char* vertex_shader_text =
 //"#version 460\n"
 //"layout(location = 0) in vec3 vNorm;\n"
@@ -38,40 +61,18 @@ typedef struct Vertex
 //"layout(location = 3) in vec4 vWeights;\n"
 //"layout(location = 0) uniform mat4 world_txfm;\n"
 //"layout(location = 1) uniform mat4 viewport_txfm;\n"
-//"layout(location = 2) uniform uint preview_joint = 2;\n"
-//"layout(location = 3) uniform mat4 inverse_bone_matrix[20];\n"
-//"layout(location = 4) uniform mat4 bone_matrix[20];\n"
+//"layout(location = 2) uniform uint preview_joint = 1;\n"
 //"out vec3 norm;\n"
 //"out float joint_color;\n"
 //"void main()\n"
 //"{\n"
-//"    gl_Position = (viewport_txfm * world_txfm * vec4(vPos, 1.0));\n"
+//"    gl_Position = viewport_txfm * world_txfm * vec4(vPos, 1.0);\n"
 //"    joint_color = 0.0;\n"
 //"    for (int i = 0; i < 4; ++i) { \n"
-//"        //gl_Position += (viewport_txfm * world_txfm * bone_matrix[vJoints[i]] * inverse_bone_matrix[vJoints[i]] * vec4(vPos, 1.0)) * vWeights[i];\n"
+//"        if (vJoints[i] == preview_joint && vWeights[i] > 0) joint_color = vWeights[i]; \n"
 //"    }\n"
 //"    norm = mat3(world_txfm) * vNorm;\n"
 //"}\n";
-static const char* vertex_shader_text =
-"#version 460\n"
-"layout(location = 0) in vec3 vNorm;\n"
-"layout(location = 1) in vec3 vPos;\n"
-"layout(location = 2) in uvec4 vJoints;\n"
-"layout(location = 3) in vec4 vWeights;\n"
-"layout(location = 0) uniform mat4 world_txfm;\n"
-"layout(location = 1) uniform mat4 viewport_txfm;\n"
-"layout(location = 2) uniform uint preview_joint = 1;\n"
-"out vec3 norm;\n"
-"out float joint_color;\n"
-"void main()\n"
-"{\n"
-"    gl_Position = viewport_txfm * world_txfm * vec4(vPos, 1.0);\n"
-"    joint_color = 0.0;\n"
-"    for (int i = 0; i < 4; ++i) { \n"
-"        if (vJoints[i] == preview_joint && vWeights[i] > 0) joint_color = vWeights[i]; \n"
-"    }\n"
-"    norm = mat3(world_txfm) * vNorm;\n"
-"}\n";
 
 
 static const char* fragment_shader_text =
@@ -103,6 +104,17 @@ struct mat4x4 mat4x4_rot_x(float angle) {
         0.0,   s,    c, 0.0,
         0.0, 0.0,  0.0, 1.0,
     };
+}
+
+struct mat4x4 mat4x4_transpose(struct mat4x4 in) {
+    struct mat4x4 ret;
+    for (int i = 0; i < 16; ++i) {
+        int row = i / 4;
+        int col = i % 4;
+
+        ret.data[col * 4 + row] = in.data[row * 4 + col];
+    }
+    return ret;
 }
 
 struct mat4x4 mat4x4_rot_y(float angle) {
@@ -316,6 +328,9 @@ struct model {
     size_t num_nodes;
     struct animation_channel* animation_channels;
     size_t num_animations;
+    uint32_t* joint_ids;
+    struct mat4x4* joint_inverse_mats;
+    size_t num_joints;
 };
 
 struct model load_model(struct buffer buf) {
@@ -326,6 +341,7 @@ struct model load_model(struct buffer buf) {
     struct buffer nodes_buf = load_file("nodes.bin", &buf);
     struct buffer vert_joints_buf = load_file("vert_joints.bin", &buf);
     struct buffer vert_weights_buf = load_file("vert_weights.bin", &buf);
+    struct buffer joint_info_buf = load_file("joint_info.bin", &buf);
 
     GLuint vertex_array;
     glGenVertexArrays(1, &vertex_array);
@@ -440,7 +456,31 @@ struct model load_model(struct buffer buf) {
         };
     }
 
-    return (struct model){vertex_array, index_buf.len / 2, nodes, num_nodes, animations, num_animations};
+    uint32_t num_joints = *(uint32_t*)joint_info_buf.data;
+    uint32_t* joint_ids = malloc(num_joints * sizeof(uint32_t));
+    struct mat4x4* inverse_bind_matrices = malloc(num_joints * sizeof(struct mat4x4));
+
+    uint32_t cursor = 4;
+    for (int i = 0; i < num_joints; ++i) {
+        joint_ids[i] = *(((uint32_t*)(joint_info_buf.data + cursor)));
+        printf("joint: %d\n", joint_ids[i]);
+        cursor += 4;
+    }
+
+    for (int i = 0; i < num_joints; ++i) {
+        printf("hi mom\n");
+        memcpy(&inverse_bind_matrices[i], joint_info_buf.data + cursor, 4 * 16);
+        //inverse_bind_matrices[i] = *(((struct mat4x4*)joint_info_buf.data + cursor));
+        inverse_bind_matrices[i] = mat4x4_transpose(inverse_bind_matrices[i]);
+        for (int j = 0; j < 16; ++j) {
+            if (j % 4 == 0) printf("\n");
+            printf("%f ", inverse_bind_matrices[i].data[j]);
+
+        }
+        cursor += 4 * 16;
+    }
+
+    return (struct model){vertex_array, index_buf.len / 2, nodes, num_nodes, animations, num_animations, joint_ids, inverse_bind_matrices, num_joints};
 }
 
 GLuint compile_shader(const char* shader_text, GLenum shader_type) {
@@ -675,15 +715,16 @@ int main(void)
 
         struct mat4x4 bone_matrices[20];
         struct mat4x4 inverse_bone_matrices[20];
-        for (int i = 0; i < 20; i++) {
-            inverse_bone_matrices[i] = mat4x4_translate(0, 0, 0);
-            bone_matrices[i] = mat4x4_translate(0, 0, 0);
+        for (int i = 0; i < model.num_joints; i++) {
+            inverse_bone_matrices[i] = model.joint_inverse_mats[i];
+            bone_matrices[i] = node_world_txfm(model.nodes, model.joint_ids[i]);
+            //bone_matrices[i] = mat4x4_translate(0, 0, 0);
         }
 
         glUniformMatrix4fv(0, 1, true, world_txfm.data);
         glUniformMatrix4fv(1, 1, true, viewport_txfm.data);
-        glUniformMatrix4fv(3, 20, true, (void*)&inverse_bone_matrices);
-        glUniformMatrix4fv(4, 20, true, (void*)&bone_matrices);
+        glUniformMatrix4fv(20, 20, true, (void*)&inverse_bone_matrices);
+        glUniformMatrix4fv(40, 20, true, (void*)&bone_matrices);
 
         glDrawElements(GL_TRIANGLES, model.num_indices, GL_UNSIGNED_SHORT, 0);
 
