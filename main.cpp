@@ -4,9 +4,9 @@
 
 #include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstdint>
 #include <iostream>
 
 #ifdef __APPLE__
@@ -35,19 +35,6 @@ typedef struct Vertex
     float col[3];
 } Vertex;
 
-// static const Vertex vertices[4] =
-//{
-//     { { -0.5f, -0.5f, 0.0f }, { 0.f, 0.f, 0.f } },
-//     { {  0.5f, -0.5f, 0.0f }, { 1.f, 0.f, 0.f } },
-//     { { -0.5f,  0.5f, 0.0f }, { 0.f, 1.f, 0.f } },
-//     { {  0.5f,  0.5f, 0.0f }, { 1.f, 1.f, 0.f } },
-// };
-//
-// static const uint32_t indices[6] = {
-//     0, 1, 2,
-//     1, 3, 2,
-// };
-
 static const char* vertex_shader_text
     = "#version 410\n"
       "layout(location = 0) in vec3 vNorm;\n"
@@ -73,25 +60,6 @@ static const char* vertex_shader_text
       "    }\n"
       "    norm = mat3(world_txfm) * vNorm;\n"
       "}\n";
-// static const char* vertex_shader_text =
-//"#version 460\n"
-//"layout(location = 0) in vec3 vNorm;\n"
-//"layout(location = 1) in vec3 vPos;\n"
-//"layout(location = 2) in uvec4 vJoints;\n"
-//"layout(location = 3) in vec4 vWeights;\n"
-//"layout(location = 0) uniform mat4 world_txfm;\n"
-//"layout(location = 1) uniform mat4 viewport_txfm;\n"
-//"layout(location = 2) uniform uint preview_joint = 1;\n"
-//"out vec3 norm;\n"
-//"out float joint_color;\n"
-//"void main()\n"
-//"{\n"
-//"    gl_Position = viewport_txfm * world_txfm * vec4(vPos, 1.0);\n"
-//"    joint_color = 0.0;\n"
-//"    for (int i = 0; i < 4; ++i) { \n"
-//"        if (vJoints[i] == preview_joint && vWeights[i] > 0) joint_color =
-// vWeights[i]; \n" "    }\n" "    norm = mat3(world_txfm) * vNorm;\n"
-//"}\n";
 
 static const char* fragment_shader_text
     = "#version 410\n"
@@ -106,256 +74,6 @@ static const char* fragment_shader_text
       "    fragment = vec4((ambient + diffuse) * vec3(1.0, 1.0, 1.0), 1.0);\n"
       "    //fragment = vec4(vec3(joint_color), 1.0);\n"
       "}\n";
-
-struct mat4x4
-{
-    float data[16];
-};
-
-struct mat4x4 mat4x4_rot_x(float angle)
-{
-    float c = cos(angle);
-    float s = sin(angle);
-
-    return (struct mat4x4) {
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        c,
-        -s,
-        0.0,
-        0.0,
-        s,
-        c,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    };
-}
-
-struct mat4x4 mat4x4_transpose(struct mat4x4 in)
-{
-    struct mat4x4 ret;
-    for (int i = 0; i < 16; ++i)
-    {
-        int row = i / 4;
-        int col = i % 4;
-
-        ret.data[col * 4 + row] = in.data[row * 4 + col];
-    }
-    return ret;
-}
-
-struct mat4x4 mat4x4_rot_y(float angle)
-{
-    float c = cos(angle);
-    float s = sin(angle);
-
-    return (struct mat4x4) {
-        c,
-        0.0,
-        -s,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-        s,
-        0.0,
-        c,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    };
-}
-
-struct mat4x4 mat4x4_rot_z(float angle)
-{
-    float c = cos(angle);
-    float s = sin(angle);
-
-    return (struct mat4x4) {
-        c,
-        -s,
-        0.0,
-        0.0,
-        s,
-        c,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    };
-}
-
-struct mat4x4 mat4x4_from_quat(float* quat)
-{
-    float x = quat[0];
-    float y = quat[1];
-    float z = quat[2];
-    float w = quat[3];
-
-    float x2 = x * x;
-    float y2 = y * y;
-    float z2 = z * z;
-    float w2 = w * w;
-
-    float xy = 2.0f * x * y;
-    float xz = 2.0f * x * z;
-    float xw = 2.0f * x * w;
-    float yz = 2.0f * y * z;
-    float yw = 2.0f * y * w;
-    float zw = 2.0f * z * w;
-
-    return (struct mat4x4) { w2 + x2 - y2 - z2, xy - zw, xz + yw, 0.0f, xy + zw, w2 - x2 + y2 - z2,
-        yz - xw, 0.0f, xz - yw, yz + xw, w2 - x2 - y2 + z2, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
-}
-
-struct mat4x4 mat4x4_translate(float x, float y, float z)
-{
-    return (struct mat4x4) {
-        1.0,
-        0.0,
-        0.0,
-        x,
-        0.0,
-        1.0,
-        0.0,
-        y,
-        0.0,
-        0.0,
-        1.0,
-        z,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    };
-}
-
-struct vec4
-{
-    float data[4];
-};
-
-struct vec4 mat4x4_row(struct mat4x4 mat, int row)
-{
-    struct vec4 ret;
-
-    int start_idx = row * 4;
-    ret.data[0] = mat.data[start_idx];
-    ret.data[1] = mat.data[start_idx + 1];
-    ret.data[2] = mat.data[start_idx + 2];
-    ret.data[3] = mat.data[start_idx + 3];
-    return ret;
-}
-
-struct vec4 mat4x4_col(struct mat4x4 mat, int col)
-{
-    struct vec4 ret;
-
-    ret.data[0] = mat.data[col];
-    ret.data[1] = mat.data[4 + col];
-    ret.data[2] = mat.data[8 + col];
-    ret.data[3] = mat.data[12 + col];
-    return ret;
-}
-
-float vec4_dot(struct vec4 a, struct vec4 b)
-{
-    return a.data[0] * b.data[0] + a.data[1] * b.data[1] + a.data[2] * b.data[2]
-        + a.data[3] * b.data[3];
-}
-
-struct mat4x4 mat4x4_scale(float x, float y, float z)
-{
-    return (struct mat4x4) {
-        x,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        y,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        z,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-    };
-}
-
-struct mat4x4 mat4x4_mul(struct mat4x4 a, struct mat4x4 b)
-{
-    struct mat4x4 ret;
-
-    for (int i = 0; i < 16; ++i)
-    {
-        int row = i / 4;
-        int col = i % 4;
-
-        struct vec4 a_row = mat4x4_row(a, row);
-        struct vec4 b_col = mat4x4_col(b, col);
-
-        ret.data[i] = vec4_dot(a_row, b_col);
-    }
-
-    return ret;
-}
-
-struct mat4x4 mat4x4_perspective(float n, float f)
-{
-    // (an + b) / n = 0
-    // (af + b) / f = 1.0
-    //
-    // an + b = 0
-    // -an = b
-    //
-    // (af - an) / f = 1.0
-    // a(f - n) / f = 1.0
-    // a(f-n) = f
-    //
-    // a = f / (f -n)
-    // b = -fn / (f - n)
-
-    float a = -f / (f - n);
-    float b = -f * n / (f - n);
-
-    return (struct mat4x4) {
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        a,
-        b,
-        0.0,
-        0.0,
-        -1.0,
-        0.0,
-    };
-}
 
 static void error_callback(int error, const char* description)
 {
@@ -434,7 +152,7 @@ struct model
     struct animation_channel* animation_channels;
     size_t                    num_animations;
     uint32_t*                 joint_ids;
-    struct mat4x4*            joint_inverse_mats;
+    Matrix*                   joint_inverse_mats;
     size_t                    num_joints;
 };
 
@@ -568,9 +286,9 @@ struct model load_model(struct buffer buf)
         };
     }
 
-    uint32_t       num_joints = *(uint32_t*)joint_info_buf.data;
-    uint32_t*      joint_ids = new uint32_t[num_joints];
-    struct mat4x4* inverse_bind_matrices = new mat4x4[num_joints];
+    uint32_t  num_joints = *(uint32_t*)joint_info_buf.data;
+    uint32_t* joint_ids = new uint32_t[num_joints];
+    Matrix*   inverse_bind_matrices = new Matrix[num_joints];
 
     uint32_t cursor = 4;
     for (int i = 0; i < num_joints; ++i)
@@ -586,12 +304,12 @@ struct model load_model(struct buffer buf)
         memcpy(&inverse_bind_matrices[i], joint_info_buf.data + cursor, 4 * 16);
         // inverse_bind_matrices[i] = *(((struct mat4x4*)joint_info_buf.data +
         // cursor));
-        inverse_bind_matrices[i] = mat4x4_transpose(inverse_bind_matrices[i]);
+        inverse_bind_matrices[i] = inverse_bind_matrices[i];
         for (int j = 0; j < 16; ++j)
         {
             if (j % 4 == 0)
                 printf("\n");
-            printf("%f ", inverse_bind_matrices[i].data[j]);
+            printf("%f ", inverse_bind_matrices[i].m[j]);
         }
         cursor += 4 * 16;
     }
@@ -646,20 +364,22 @@ GLuint make_bone(void)
     return vertex_array;
 }
 
-struct mat4x4 node_world_txfm(struct node* nodes, size_t idx)
+Matrix node_world_txfm(struct node* nodes, size_t idx)
 {
 
-    struct node   node = nodes[idx];
-    struct mat4x4 node_txfm = mat4x4_scale(node.scale[0], node.scale[1], node.scale[2]);
+    struct node node = nodes[idx];
+    Matrix      node_txfm = Matrix::CreateScale(node.scale[0], node.scale[1], node.scale[2]);
 
-    node_txfm = mat4x4_mul(mat4x4_from_quat(node.rotation), node_txfm);
+    Quaternion rotation
+        = Quaternion(node.rotation[0], node.rotation[1], node.rotation[2], node.rotation[3]);
+    node_txfm *= Matrix::CreateFromQuaternion(rotation);
 
-    node_txfm = mat4x4_mul(
-        mat4x4_translate(node.translation[0], node.translation[1], node.translation[2]), node_txfm);
+    node_txfm
+        *= Matrix::CreateTranslation(node.translation[0], node.translation[1], node.translation[2]);
 
     if (node.parent != UINT32_MAX)
     {
-        node_txfm = mat4x4_mul(node_world_txfm(nodes, node.parent), node_txfm);
+        node_txfm *= node_world_txfm(nodes, node.parent);
     }
 
     return node_txfm;
@@ -726,7 +446,6 @@ void apply_animation(float time_since_start, struct model* model)
         }
     }
 }
-
 
 int main(void)
 {
@@ -832,18 +551,22 @@ int main(void)
         glUseProgram(program);
         glBindVertexArray(model.vao);
 
-        struct mat4x4 world_txfm = mat4x4_translate(0, -0.0, 0.0);
-        world_txfm = mat4x4_mul(mat4x4_rot_y(angle), world_txfm);
-        world_txfm = mat4x4_mul(mat4x4_translate(0.0, 0.0, -1.0), world_txfm);
+        Matrix world_txfm = Matrix::CreateTranslation(0, -0.0, 0.0);
+        world_txfm *= Matrix::CreateRotationY(angle);
+        world_txfm *= Matrix::CreateTranslation(0.0, 0.0, -1.0);
+        world_txfm = world_txfm.Transpose();
 
-        struct mat4x4 viewport_txfm = mat4x4_perspective(0.1, 10.0);
+        Matrix viewport_txfm = Matrix::CreatePerspectiveFieldOfView(XMConvertToRadians(90.0f), ratio, 0.1f, 10.0f);
+        viewport_txfm = viewport_txfm.Transpose();
 
-        struct mat4x4 bone_matrices[20];
-        struct mat4x4 inverse_bone_matrices[20];
+        Matrix bone_matrices[20];
+        Matrix inverse_bone_matrices[20];
         for (int i = 0; i < model.num_joints; i++)
         {
             inverse_bone_matrices[i] = model.joint_inverse_mats[i];
+            inverse_bone_matrices[i] = inverse_bone_matrices[i].Transpose();
             bone_matrices[i] = node_world_txfm(model.nodes, model.joint_ids[i]);
+            bone_matrices[i] = bone_matrices[i].Transpose();
             // bone_matrices[i] = mat4x4_translate(0, 0, 0);
         }
 
@@ -853,10 +576,11 @@ int main(void)
         GLuint inverse_bone_matrix_loc = glGetUniformLocation(program, "inverse_bone_matrix");
         GLuint bone_matrix_loc = glGetUniformLocation(program, "bone_matrix");
 
-        glUniformMatrix4fv(world_txfm_loc, 1, true, world_txfm.data);
-        glUniformMatrix4fv(viewport_txfm_loc, 1, true, viewport_txfm.data);
-        glUniformMatrix4fv(inverse_bone_matrix_loc, 20, true, reinterpret_cast<GLfloat*>(&inverse_bone_matrices));
-        glUniformMatrix4fv(bone_matrix_loc, 20, true, reinterpret_cast<GLfloat*>(&bone_matrices));
+        glUniformMatrix4fv(world_txfm_loc, 1, true, reinterpret_cast<float*>(&world_txfm));
+        glUniformMatrix4fv(viewport_txfm_loc, 1, true, reinterpret_cast<float*>(&viewport_txfm));
+        glUniformMatrix4fv(
+            inverse_bone_matrix_loc, 20, true, reinterpret_cast<float*>(&inverse_bone_matrices));
+        glUniformMatrix4fv(bone_matrix_loc, 20, true, reinterpret_cast<float*>(&bone_matrices));
 
         glDrawElements(GL_TRIANGLES, model.num_indices, GL_UNSIGNED_SHORT, 0);
 
@@ -864,9 +588,9 @@ int main(void)
 
         for (int i = 0; i < model.num_nodes; i++)
         {
-            struct mat4x4 bone_txfm = node_world_txfm(model.nodes, i);
-            bone_txfm = mat4x4_mul(world_txfm, bone_txfm);
-            glUniformMatrix4fv(preview_joint_loc, 1, true, bone_txfm.data);
+            Matrix bone_txfm = node_world_txfm(model.nodes, i);
+            bone_txfm *= world_txfm;
+            glUniformMatrix4fv(preview_joint_loc, 1, true, reinterpret_cast<float*>(&bone_txfm));
             glDrawArrays(GL_LINES, 0, 2);
         }
 
