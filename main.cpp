@@ -1,5 +1,9 @@
 
+#ifdef USE_OPENGL
 #include <glad/glad.h>
+
+#include "imgui_impl_opengl3.h"
+#endif
 
 #include <cassert>
 #include <cmath>
@@ -28,12 +32,20 @@
 using namespace DirectX;
 using namespace DirectX::SimpleMath;
 
+#ifdef USE_METAL
+#include <Metal/Metal.hpp>
+#include <QuartzCore/QuartzCore.hpp>
+#endif
+
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
 #define CGLTF_IMPLEMENTATION
 #include <cgltf.h>
+
+#include "imgui.h"
+#include "imgui_impl_sdl3.h"
 
 typedef struct Vertex
 {
@@ -149,7 +161,6 @@ int animation_channel_components(cgltf_animation_path_type path_type)
 struct model
 {
     cgltf_data*  model_data;
-    GLuint       vao;
     size_t       num_indices;
     size_t       num_nodes;
     animation*   animations;
@@ -158,6 +169,10 @@ struct model
     uint32_t*    joint_ids;
     Matrix*      joint_inverse_mats;
     size_t       num_joints;
+
+#ifdef USE_OPENGL
+    GLuint vao;
+#endif
 };
 
 constexpr int ComponentCount(cgltf_type type)
@@ -312,6 +327,7 @@ struct model load_model()
         skin->inverse_bind_matrices[i];
     }
 
+#ifdef USE_OPENGL
     GLuint vertex_array;
     glGenVertexArrays(1, &vertex_array);
     glBindVertexArray(vertex_array);
@@ -354,6 +370,7 @@ struct model load_model()
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint16_t) * numIndices, indices, GL_STATIC_DRAW);
 
     glBindVertexArray(0);
+#endif
 
     animation* animations = new animation[data->animations_count];
     for (uint32_t i = 0; i < data->animations_count; ++i)
@@ -410,11 +427,24 @@ struct model load_model()
         inverse_bind_matrices[i] = Matrix(inverse_bind_matrices_buf + (i * 16));
     }
 
-    return (struct model) { data, vertex_array, (size_t)numIndices, data->nodes_count, animations,
-        data->animations_count, skin->joints, joint_ids, inverse_bind_matrices,
-        skin->joints_count };
+    struct model model = {};
+    model.model_data = data;
+    model.num_indices = (size_t)numIndices;
+    model.num_nodes = (size_t)data->nodes_count;
+    model.animations = animations;
+    model.num_animations = data->animations_count;
+    model.joints = skin->joints;
+    model.joint_ids = joint_ids;
+    model.joint_inverse_mats = inverse_bind_matrices;
+    model.num_joints = skin->joints_count;
+#ifdef USE_OPENGL
+    model.vao = vertex_array;
+#endif
+
+    return model;
 }
 
+#ifdef USE_OPENGL
 GLuint compile_shader(const char* shader_text, GLenum shader_type)
 {
     const GLuint vertex_shader = glCreateShader(shader_type);
@@ -460,6 +490,7 @@ GLuint make_bone(void)
 
     return vertex_array;
 }
+#endif
 
 Matrix node_world_txfm(cgltf_node* node)
 {
@@ -562,71 +593,6 @@ void apply_animation(float time_since_start, struct model* model, int index)
     }
 }
 
-// void apply_animation(float time_since_start, struct model* model, int index)
-//{
-//     assert(index <= model->num_animations);
-//
-//     animation* animation = &model->animations[index];
-//
-//     for (int channel_idx = 0; channel_idx < animation->num_channels; ++channel_idx)
-//     {
-//         struct animation_channel* channel = &animation->channels[channel_idx];
-//         float                     rel_time_since_start
-//             = fmod(time_since_start, channel->times[channel->num_timesteps - 1]);
-//
-//         int last_timestep;
-//         // 0, am i bigger? yes? sick
-//         for (last_timestep = channel->num_timesteps - 1; last_timestep >= 0; --last_timestep)
-//         {
-//             if (rel_time_since_start >= channel->times[last_timestep])
-//                 break;
-//         }
-//
-//         int next_timestep = last_timestep + 1;
-//         if (next_timestep >= channel->num_timesteps)
-//         {
-//             next_timestep = last_timestep; // Prevent out-of-bounds access
-//         }
-//
-//         float out[4];
-//         int   components = animation_channel_components(channel->path_type);
-//
-//         float* last_data = &channel->data[last_timestep * components];
-//         float* next_data = &channel->data[next_timestep * components];
-//
-//         float last_time = channel->times[last_timestep];
-//         float next_time = channel->times[next_timestep];
-//
-//         for (int i = 0; i < components; ++i)
-//         {
-//             out[i] = lerp(last_data[i], next_data[i],
-//                 (rel_time_since_start - last_time) / (next_time - last_time));
-//         }
-//
-//         cgltf_node* nodes = model->model_data->nodes;
-//         switch (channel->path_type)
-//         {
-//         case cgltf_animation_path_type_translation:
-//             nodes[channel->target].translation[0] = out[0];
-//             nodes[channel->target].translation[1] = out[1];
-//             nodes[channel->target].translation[2] = out[2];
-//             break;
-//         case cgltf_animation_path_type_rotation:
-//             nodes[channel->target].rotation[0] = out[0];
-//             nodes[channel->target].rotation[1] = out[1];
-//             nodes[channel->target].rotation[2] = out[2];
-//             nodes[channel->target].rotation[3] = out[3];
-//             break;
-//         case cgltf_animation_path_type_scale:
-//             nodes[channel->target].scale[0] = out[0];
-//             nodes[channel->target].scale[1] = out[1];
-//             nodes[channel->target].scale[2] = out[2];
-//
-//             break;
-//         }
-//     }
-// }
-
 struct SDLWindowDeleter
 {
     void operator()(SDL_Window* window) const
@@ -640,21 +606,303 @@ struct SDLWindowDeleter
 };
 using SDLWindowPtr = std::unique_ptr<SDL_Window, SDLWindowDeleter>;
 
+static constexpr int BUFFER_COUNT = 3;
+static constexpr int MULTISAMPLE_COUNT = 4;
+
+#ifndef USE_METAL
 struct App
+#else
+struct App : public CA::MetalDisplayLinkDelegate
+#endif
 {
-    SDLWindowPtr  window;
+    SDLWindowPtr window;
+    model        model;
+    GameTimer    timer;
+    float        angle;
+    int          animation_idx = 0;
+
+    void tick();
+    void render();
+
+#ifdef USE_METAL
+    NS::SharedPtr<MTL::Device>            mtlDevice;
+    NS::SharedPtr<MTL::CommandQueue>      mtlCommandQueue;
+    NS::SharedPtr<CA::MetalDisplayLink>   mtlDisplayLink;
+    NS::SharedPtr<MTL::Texture>           mtlMsaaTexture;
+    NS::SharedPtr<MTL::Texture>           mtlDepthStencilTexture;
+    NS::SharedPtr<MTL::DepthStencilState> mtlDepthStencilState;
+    NS::SharedPtr<MTL::Library>           mtlPipelineLibrary;
+    MTL::PixelFormat                      mtlFrameBufferPixelFormat;
+    uint32_t                              frameIndex = 0;
+    dispatch_semaphore_t                  frameSemaphore;
+
+    void metalDisplayLinkNeedsUpdate(
+        CA::MetalDisplayLink* displayLink, CA::MetalDisplayLinkUpdate* update) override;
+
+    void createDepthStencil();
+
+    void render_metal(MTL::RenderCommandEncoder* encoder);
+#endif
+
+#ifdef USE_OPENGL
     SDL_GLContext context;
-    model         model;
     GLuint        bone_vao;
     GLuint        vertex_shader;
     GLuint        fragment_shader;
     GLuint        program;
-    GameTimer     timer;
-    float         angle;
+
+    void render_opengl();
+#endif
 };
+
+void App::tick()
+{
+}
+
+#ifdef USE_OPENGL
+void App::render_opengl()
+{
+    int width, height;
+    SDL_GetWindowSizeInPixels(window.get(), &width, &height);
+    const float ratio = width / (float)height;
+
+    glViewport(0, 0, width, height);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glUseProgram(program);
+    glBindVertexArray(model.vao);
+
+    Matrix world_txfm = Matrix::CreateTranslation(0, -0.0, 0.0);
+    world_txfm *= Matrix::CreateRotationY(DirectX::XMConvertToRadians(45.0f));
+    world_txfm *= Matrix::CreateTranslation(0.0, 0.0, -1.0);
+    world_txfm = world_txfm.Transpose();
+
+    Matrix viewport_txfm
+        = Matrix::CreatePerspectiveFieldOfView(XMConvertToRadians(90.0f), ratio, 0.1f, 10.0f);
+    viewport_txfm = viewport_txfm.Transpose();
+
+    Matrix bone_matrices[72];
+    Matrix inverse_bone_matrices[72];
+    for (int i = 0; i < model.num_joints; i++)
+    {
+        inverse_bone_matrices[i] = model.joint_inverse_mats[i];
+        inverse_bone_matrices[i] = inverse_bone_matrices[i].Transpose();
+
+        bone_matrices[i] = node_world_txfm(&model.model_data->nodes[model.joint_ids[i]]);
+        bone_matrices[i] = bone_matrices[i].Transpose();
+    }
+
+    GLuint world_txfm_loc = glGetUniformLocation(program, "world_txfm");
+    GLuint viewport_txfm_loc = glGetUniformLocation(program, "viewport_txfm");
+    GLuint preview_joint_loc = glGetUniformLocation(program, "preview_joint");
+    GLuint inverse_bone_matrix_loc = glGetUniformLocation(program, "inverse_bone_matrix");
+    GLuint bone_matrix_loc = glGetUniformLocation(program, "bone_matrix");
+
+    glUniformMatrix4fv(world_txfm_loc, 1, true, reinterpret_cast<float*>(&world_txfm));
+    glUniformMatrix4fv(viewport_txfm_loc, 1, true, reinterpret_cast<float*>(&viewport_txfm));
+    glUniformMatrix4fv(
+        inverse_bone_matrix_loc, 20, true, reinterpret_cast<float*>(&inverse_bone_matrices));
+    glUniformMatrix4fv(bone_matrix_loc, 20, true, reinterpret_cast<float*>(&bone_matrices));
+
+    glDrawElements(GL_TRIANGLES, model.num_indices, GL_UNSIGNED_SHORT, 0);
+
+    // ImGui rendering
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 5.0);
+    ImGui::SetNextWindowPos(ImVec2(10, 20));
+    // ImGui::SetNextWindowSize(ImVec2(250, 0), ImGuiCond_FirstUseEver);
+    ImGui::Begin(
+        "Animation Example", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar);
+    ImGui::Text("%s (%.1d fps)", SDL_GetWindowTitle(window.get()), timer.framesPerSecond());
+    // std::vector<std::string> animations = m_asset->animations();
+
+    if (ImGui::Combo(
+            "Animation", &animation_idx,
+            [](void* data, int index) -> const char* {
+                animation* animations = static_cast<animation*>(data);
+                return animations[index].name.c_str();
+            },
+            model.animations, model.num_animations))
+    {
+    }
+    ImGui::PopStyleVar();
+
+    ImGui::End();
+
+    // Rendering
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    SDL_GL_SwapWindow(window.get());
+}
+#endif
+
+#ifdef USE_METAL
+
+void App::render_metal(MTL::RenderCommandEncoder* encoder)
+{
+}
+
+void App::createDepthStencil()
+{
+    int32_t frameWidth = 0;
+    int32_t frameHeight = 0;
+    SDL_GetWindowSizeInPixels(window.get(), &frameWidth, &frameHeight);
+
+    // Create a multisample texture
+    MTL::TextureDescriptor* msaaTextureDescriptor = MTL::TextureDescriptor::texture2DDescriptor(
+        MTL::PixelFormatBGRA8Unorm_sRGB, frameWidth, frameHeight, false);
+    msaaTextureDescriptor->setTextureType(MTL::TextureType2DMultisample);
+    msaaTextureDescriptor->setSampleCount(MULTISAMPLE_COUNT); // Set sample count for MSAA
+    msaaTextureDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+    msaaTextureDescriptor->setStorageMode(MTL::StorageModePrivate);
+
+    mtlMsaaTexture = NS::TransferPtr(mtlDevice->newTexture(msaaTextureDescriptor));
+    msaaTextureDescriptor->release();
+
+    mtlDepthStencilState.reset();
+
+    MTL::DepthStencilDescriptor* depthStencilDescriptor
+        = MTL::DepthStencilDescriptor::alloc()->init();
+    depthStencilDescriptor->setDepthCompareFunction(MTL::CompareFunctionLess);
+    depthStencilDescriptor->setDepthWriteEnabled(true);
+
+    mtlDepthStencilState = NS::TransferPtr(mtlDevice->newDepthStencilState(depthStencilDescriptor));
+
+    depthStencilDescriptor->release();
+
+    MTL::TextureDescriptor* textureDescriptor = MTL::TextureDescriptor::texture2DDescriptor(
+        MTL::PixelFormatDepth32Float_Stencil8, frameWidth, frameHeight, false);
+    textureDescriptor->setTextureType(MTL::TextureType2DMultisample);
+    textureDescriptor->setSampleCount(MULTISAMPLE_COUNT);
+    textureDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+    textureDescriptor->setResourceOptions(
+        MTL::ResourceOptionCPUCacheModeDefault | MTL::ResourceStorageModePrivate);
+    textureDescriptor->setStorageMode(MTL::StorageModeMemoryless);
+
+    mtlDepthStencilTexture = NS::TransferPtr(mtlDevice->newTexture(textureDescriptor));
+
+    textureDescriptor->release();
+}
+
+void App::metalDisplayLinkNeedsUpdate(
+    CA::MetalDisplayLink* displayLink, CA::MetalDisplayLinkUpdate* update)
+{
+    timer.tick([this]() { tick(); });
+
+    frameIndex = (frameIndex + 1) % BUFFER_COUNT;
+
+    MTL::CommandBuffer* commandBuffer = mtlCommandQueue->commandBuffer();
+
+    dispatch_semaphore_wait(frameSemaphore, DISPATCH_TIME_FOREVER);
+    commandBuffer->addCompletedHandler(
+        [this](MTL::CommandBuffer* /*buffer*/) { dispatch_semaphore_signal(frameSemaphore); });
+
+    CA::MetalDrawable* drawable = update->drawable();
+    if (drawable != nullptr)
+    {
+        // Update depth stencil texture if necessary¬
+        if (drawable->texture()->width() != mtlDepthStencilTexture->width()
+            || drawable->texture()->height() != mtlDepthStencilTexture->height())
+        {
+            int32_t frameWidth = 0;
+            int32_t frameHeight = 0;
+            SDL_GetWindowSizeInPixels(window.get(), &frameWidth, &frameHeight);
+
+            mtlMsaaTexture.reset();
+
+            // Create a multisample texture
+            MTL::TextureDescriptor* msaaTextureDescriptor
+                = MTL::TextureDescriptor::texture2DDescriptor(
+                    MTL::PixelFormatBGRA8Unorm_sRGB, frameWidth, frameHeight, false);
+            msaaTextureDescriptor->setTextureType(MTL::TextureType2DMultisample);
+            msaaTextureDescriptor->setSampleCount(MULTISAMPLE_COUNT); // Set sample count for MSAA
+            msaaTextureDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+            msaaTextureDescriptor->setStorageMode(MTL::StorageModePrivate);
+
+            mtlMsaaTexture = NS::TransferPtr(mtlDevice->newTexture(msaaTextureDescriptor));
+
+            mtlDepthStencilTexture.reset();
+
+            MTL::TextureDescriptor* textureDescriptor = MTL::TextureDescriptor::texture2DDescriptor(
+
+                MTL::PixelFormatDepth32Float_Stencil8, frameWidth, frameHeight, false);
+            textureDescriptor->setSampleCount(MULTISAMPLE_COUNT);
+            textureDescriptor->setTextureType(MTL::TextureType2DMultisample);
+            textureDescriptor->setUsage(MTL::TextureUsageRenderTarget);
+            textureDescriptor->setResourceOptions(
+                MTL::ResourceOptionCPUCacheModeDefault | MTL::ResourceStorageModePrivate);
+            textureDescriptor->setStorageMode(MTL::StorageModeMemoryless);
+
+            mtlDepthStencilTexture = NS::TransferPtr(mtlDevice->newTexture(textureDescriptor));
+        }
+
+        MTL::RenderPassDescriptor* passDescriptor
+            = MTL::RenderPassDescriptor::renderPassDescriptor();
+        passDescriptor->colorAttachments()->object(0)->setResolveTexture(drawable->texture());
+        passDescriptor->colorAttachments()->object(0)->setTexture(mtlMsaaTexture.get());
+        passDescriptor->colorAttachments()->object(0)->setLoadAction(MTL::LoadActionClear);
+        passDescriptor->colorAttachments()->object(0)->setStoreAction(
+            MTL::StoreActionMultisampleResolve);
+        passDescriptor->colorAttachments()->object(0)->setClearColor(
+            MTL::ClearColor(.39, .58, .92, 1.0));
+        passDescriptor->depthAttachment()->setTexture(mtlDepthStencilTexture.get());
+        passDescriptor->depthAttachment()->setLoadAction(MTL::LoadActionClear);
+        passDescriptor->depthAttachment()->setStoreAction(MTL::StoreActionDontCare);
+        passDescriptor->depthAttachment()->setClearDepth(1.0);
+        passDescriptor->stencilAttachment()->setTexture(mtlDepthStencilTexture.get());
+        passDescriptor->stencilAttachment()->setLoadAction(MTL::LoadActionClear);
+        passDescriptor->stencilAttachment()->setStoreAction(MTL::StoreActionDontCare);
+        passDescriptor->stencilAttachment()->setClearStencil(0);
+
+        MTL::RenderCommandEncoder* commandEncoder
+            = commandBuffer->renderCommandEncoder(passDescriptor);
+
+        commandEncoder->pushDebugGroup(MTLSTR("SAMPLE RENDERING"));
+
+        render_metal(commandEncoder);
+
+        commandEncoder->popDebugGroup();
+
+        //        // ImGui rendering
+        //        ImGui_ImplMetal_NewFrame(passDescriptor);
+        //        ImGui_ImplSDL3_NewFrame();
+        //        ImGui::NewFrame();
+        //
+        //        onSetupUi(m_timer);
+        //
+        //        commandEncoder->pushDebugGroup(MTLSTR("IMGUI RENDERING"));
+        //
+        //        // Rendering
+        //        ImGui::Render();
+        //        ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), commandBuffer,
+        //        commandEncoder);
+
+        commandEncoder->popDebugGroup();
+
+        commandEncoder->endEncoding();
+
+        commandBuffer->presentDrawable(drawable);
+        commandBuffer->commit();
+    }
+}
+
+#endif
 
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.IniSavingRate = 0.0F;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;  // Enable Gamepad Controls
+    ImGui::StyleColorsDark();
 
     // SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "waitevent");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
@@ -664,18 +912,24 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         return SDL_APP_FAILURE;
     }
 
+    int flags = SDL_WINDOW_RESIZABLE;
+#ifdef USE_OPENGL
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    flags |= SDL_WINDOW_OPENGL;
+#else
+    flags |= SDL_WINDOW_METAL;
+#endif
     App* app = new App;
-    app->window.reset(
-        SDL_CreateWindow("OpenGL Triangle", 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE));
+    app->window.reset(SDL_CreateWindow("OpenGL Triangle", 800, 600, flags));
     if (!app->window)
     {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create window: %s\n", SDL_GetError());
         return SDL_APP_FAILURE;
     }
 
+#ifdef USE_OPENGL
     app->context = SDL_GL_CreateContext(app->window.get());
     if (!app->context)
     {
@@ -690,12 +944,42 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         return SDL_APP_FAILURE;
     }
     std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
-
     SDL_GL_MakeCurrent(app->window.get(), app->context);
     SDL_GL_SwapWindow(app->window.get());
 
+    ImGui_ImplOpenGL3_Init();
+    ImGui_ImplSDL3_InitForOpenGL(app->window.get(), app->context);
+#else
+    SDL_MetalView mtlView = SDL_Metal_CreateView(app->window.get());
+
+    app->mtlDevice = NS::TransferPtr(MTL::CreateSystemDefaultDevice());
+
+    auto* layer = static_cast<CA::MetalLayer*>((SDL_Metal_GetLayer(mtlView)));
+    app->mtlFrameBufferPixelFormat = MTL::PixelFormatBGRA8Unorm_sRGB;
+    layer->setPixelFormat(app->mtlFrameBufferPixelFormat);
+    layer->setDevice(app->mtlDevice.get());
+
+    app->mtlCommandQueue = NS::TransferPtr(app->mtlDevice->newCommandQueue());
+
+    app->createDepthStencil();
+
+    // Load Pipeline Library
+    // TODO: Showcase how to use Metal archives to erase compilation
+    app->mtlPipelineLibrary = NS::TransferPtr(app->mtlDevice->newDefaultLibrary());
+
+    app->frameSemaphore = dispatch_semaphore_create(BUFFER_COUNT);
+
+    app->mtlDisplayLink = NS::TransferPtr(CA::MetalDisplayLink::alloc()->init(layer));
+    // Enable 120HZ refresh for devices that support Pro Motion
+    //    app->mtlDisplayLink->setPreferredFrameRateRange({ 60, mode->refresh_rate,
+    //    mode->refresh_rate });
+    app->mtlDisplayLink->setDelegate(app);
+
+#endif
+
     app->model = load_model();
 
+#ifdef USE_OPENGL
     app->vertex_shader = compile_shader(vertex_shader_text, GL_VERTEX_SHADER);
     app->fragment_shader = compile_shader(fragment_shader_text, GL_FRAGMENT_SHADER);
 
@@ -711,8 +995,12 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     glEnable(GL_DEPTH_TEST);
 
     glLineWidth(5);
+#else
+
+#endif
 
     app->timer.setFixedTimeStep(false);
+    app->timer.resetElapsedTime();
 
     *appstate = app;
 
@@ -729,71 +1017,14 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
             static float accum = 0.0f;
             accum += elapsed;
-            apply_animation(accum, &app->model, 3);
+            apply_animation(accum, &app->model, app->animation_idx);
 
             app->angle += 2.0f * M_PI * elapsed * 0.5;
             app->angle = fmod(app->angle, 2 * M_PI);
 
-            int width, height;
-            SDL_GetWindowSizeInPixels(app->window.get(), &width, &height);
-            const float ratio = width / (float)height;
-
-            glViewport(0, 0, width, height);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-            glUseProgram(app->program);
-            glBindVertexArray(app->model.vao);
-
-            Matrix world_txfm = Matrix::CreateTranslation(0, -0.0, 0.0);
-            world_txfm *= Matrix::CreateRotationY(DirectX::XMConvertToRadians(45.0f));
-            world_txfm *= Matrix::CreateTranslation(0.0, 0.0, -1.0);
-            world_txfm = world_txfm.Transpose();
-
-            Matrix viewport_txfm = Matrix::CreatePerspectiveFieldOfView(
-                XMConvertToRadians(90.0f), ratio, 0.1f, 10.0f);
-            viewport_txfm = viewport_txfm.Transpose();
-
-            Matrix bone_matrices[72];
-            Matrix inverse_bone_matrices[72];
-            for (int i = 0; i < app->model.num_joints; i++)
-            {
-                inverse_bone_matrices[i] = app->model.joint_inverse_mats[i];
-                inverse_bone_matrices[i] = inverse_bone_matrices[i].Transpose();
-
-                bone_matrices[i]
-                    = node_world_txfm(&app->model.model_data->nodes[app->model.joint_ids[i]]);
-                bone_matrices[i] = bone_matrices[i].Transpose();
-            }
-
-            GLuint world_txfm_loc = glGetUniformLocation(app->program, "world_txfm");
-            GLuint viewport_txfm_loc = glGetUniformLocation(app->program, "viewport_txfm");
-            GLuint preview_joint_loc = glGetUniformLocation(app->program, "preview_joint");
-            GLuint inverse_bone_matrix_loc
-                = glGetUniformLocation(app->program, "inverse_bone_matrix");
-            GLuint bone_matrix_loc = glGetUniformLocation(app->program, "bone_matrix");
-
-            glUniformMatrix4fv(world_txfm_loc, 1, true, reinterpret_cast<float*>(&world_txfm));
-            glUniformMatrix4fv(
-                viewport_txfm_loc, 1, true, reinterpret_cast<float*>(&viewport_txfm));
-            glUniformMatrix4fv(inverse_bone_matrix_loc, 20, true,
-                reinterpret_cast<float*>(&inverse_bone_matrices));
-            glUniformMatrix4fv(bone_matrix_loc, 20, true, reinterpret_cast<float*>(&bone_matrices));
-
-            glDrawElements(GL_TRIANGLES, app->model.num_indices, GL_UNSIGNED_SHORT, 0);
-
-            // glBindVertexArray(app->bone_vao);
-
-            //            for (int i = 0; i < app->model.num_nodes; i++)
-            //            {
-            //                Matrix bone_txfm = node_world_txfm(&app->model.model_data->nodes[i]);
-            //
-            //                bone_txfm *= world_txfm;
-            //                glUniformMatrix4fv(
-            //                    preview_joint_loc, 1, true, reinterpret_cast<float*>(&bone_txfm));
-            //                glDrawArrays(GL_LINES, 0, 2);
-            //            }
-
-            SDL_GL_SwapWindow(app->window.get());
+#ifdef USE_OPENGL
+            app->render_opengl();
+#endif
         });
     }
 
@@ -819,6 +1050,8 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
     default:
         break;
     }
+
+    ImGui_ImplSDL3_ProcessEvent(event);
 
     return SDL_APP_CONTINUE;
 }
