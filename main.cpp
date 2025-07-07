@@ -1,13 +1,16 @@
-// #define GL_GLEXT_PROTOTYPES
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
+
+#include <glad/glad.h>
 
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
+
+#include "File.hpp"
+#include "GameTimer.hpp"
 
 #ifdef __APPLE__
 #ifdef __arm__
@@ -25,15 +28,28 @@
 using namespace DirectX;
 using namespace DirectX::SimpleMath;
 
-// #define SDL_MAIN_USE_CALLBACKS
-// #include <SDL3/SDL.h>
-// #include <SDL3/SDL_main.h>
+#define SDL_MAIN_USE_CALLBACKS
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+
+#define CGLTF_IMPLEMENTATION
+#include <cgltf.h>
 
 typedef struct Vertex
 {
     float pos[3];
     float col[3];
 } Vertex;
+
+struct gltf_node
+{
+    Vector3    translation;
+    Vector3    scale;
+    Quaternion rotation;
+    int        idx;
+    gltf_node* parent;
+    int        parentIdx;
+};
 
 static const char* vertex_shader_text
     = "#version 410\n"
@@ -95,16 +111,25 @@ struct buffer
 
 struct buffer load_file(const char* path, struct buffer* buf)
 {
-    FILE* f = fopen(path, "rb");
-    assert(f);
-    size_t read_len = fread(buf->data, 1, buf->len, f);
-    assert(read_len > 0);
-    fclose(f);
+    try
+    {
+        File file(path);
 
-    struct buffer ret = { buf->data, read_len };
-    buf->data += read_len;
-    buf->len -= read_len;
-    return ret;
+        const auto bytes = file.readAll();
+        if (!bytes.empty())
+        {
+            struct buffer ret = { (char*)malloc(bytes.size()), bytes.size() };
+            memcpy(ret.data, bytes.data(), bytes.size());
+            return ret;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        SDL_LogError(
+            SDL_LOG_CATEGORY_APPLICATION, "Failed to load file '%s': %s\n", path, e.what());
+    }
+
+    return {};
 }
 
 struct node
@@ -145,27 +170,188 @@ int animation_channel_components(enum animation_type animation_type)
 
 struct model
 {
+    cgltf_data*               model_data;
     GLuint                    vao;
     size_t                    num_indices;
-    struct node*              nodes;
     size_t                    num_nodes;
     struct animation_channel* animation_channels;
     size_t                    num_animations;
+    cgltf_node**              joints;
     uint32_t*                 joint_ids;
     Matrix*                   joint_inverse_mats;
     size_t                    num_joints;
 };
 
+struct buffer load_positions(cgltf_data* model_data)
+{
+    std::vector<float> positions;
+
+    const cgltf_mesh* mesh = &model_data->meshes[0];
+    for (uint32_t i = 0; i < mesh->primitives_count; ++i)
+    {
+        const cgltf_primitive* prim = &mesh->primitives[i];
+    }
+}
+
+constexpr int ComponentCount(cgltf_type type)
+{
+    switch (type)
+    {
+    case cgltf_type_scalar:
+        return 1;
+    case cgltf_type_vec2:
+        return 2;
+    case cgltf_type_vec3:
+        return 3;
+    case cgltf_type_vec4:
+    case cgltf_type_mat2:
+        return 4;
+    case cgltf_type_mat3:
+        return 9;
+    case cgltf_type_mat4:
+        return 16;
+    case cgltf_type_invalid:
+    case cgltf_type_max_enum:
+        break;
+    }
+
+    return -1;
+}
+
+template <typename T>
+void LoadAttribute(const cgltf_accessor* accessor, T* dest, int numComponents)
+{
+    cgltf_size n = 0;
+    T* buffer = (T*)accessor->buffer_view->buffer->data + accessor->buffer_view->offset / sizeof(T)
+        + accessor->offset / sizeof(T);
+
+    for (unsigned int k = 0; k < accessor->count; ++k)
+    {
+        for (int j = 0; j < numComponents; ++j)
+        {
+            dest[numComponents * k + j] = buffer[n + j];
+        }
+        n += accessor->stride / sizeof(T);
+    }
+}
+
+void calculate_vertex_info(const cgltf_primitive* primitive, int* numVertices, int* numIndices)
+{
+    *numIndices += primitive->indices->count;
+
+    // NOTE: this assumes the same number of vertices for all attributes
+    for (int32_t j = 0; j < primitive->attributes_count; j++)
+    {
+        const cgltf_attribute* attribute = &primitive->attributes[j];
+        if (attribute->type == cgltf_attribute_type_position)
+        {
+            *numVertices += attribute->data->count;
+        }
+    }
+}
+
+gltf_node* build_node(cgltf_data* data, cgltf_node* node)
+{
+    gltf_node* g_node = new gltf_node;
+    g_node->translation = Vector3(node->translation[0], node->translation[1], node->translation[2]);
+    g_node->scale = Vector3(node->scale[0], node->scale[1], node->scale[2]);
+    g_node->rotation
+        = Quaternion(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
+    g_node->idx = (ptrdiff_t)(node - data->nodes);
+
+    if (node->parent != nullptr)
+    {
+        g_node->parent = build_node(data, node->parent);
+        g_node->parentIdx = (ptrdiff_t)(node->parent - data->nodes);
+    }
+
+    return g_node;
+}
+
 struct model load_model(struct buffer buf)
 {
+    std::filesystem::path path = std::filesystem::path(SDL_GetBasePath()) / "guy.gltf";
 
-    struct buffer positions_buf = load_file("positions.bin", &buf);
-    struct buffer normals_buf = load_file("normals.bin", &buf);
-    struct buffer index_buf = load_file("indices.bin", &buf);
-    struct buffer nodes_buf = load_file("nodes.bin", &buf);
-    struct buffer vert_joints_buf = load_file("vert_joints.bin", &buf);
-    struct buffer vert_weights_buf = load_file("vert_weights.bin", &buf);
-    struct buffer joint_info_buf = load_file("joint_info.bin", &buf);
+    cgltf_data*   data = nullptr;
+    cgltf_options options = {};
+    cgltf_result  result = cgltf_parse_file(&options, path.string().c_str(), &data);
+    if (result != cgltf_result_success)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF file");
+        abort();
+    }
+
+    if (cgltf_load_buffers(&options, data, path.string().c_str()) != cgltf_result_success)
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load GLTF buffers");
+        abort();
+    }
+
+    int                    numVertices = 0;
+    int                    numIndices = 0;
+    const cgltf_primitive* prim = &data->meshes[0].primitives[0];
+    calculate_vertex_info(prim, &numVertices, &numIndices);
+
+    float*    positions = new float[3 * numVertices];
+    float*    normals = new float[3 * numVertices];
+    uint8_t*  joints = new uint8_t[4 * numVertices];
+    float*    weights = new float[4 * numVertices];
+    uint16_t* indices = new uint16_t[numIndices];
+
+    const cgltf_accessor* accessor = nullptr;
+    for (int32_t attr = 0; attr < prim->attributes_count; attr++)
+    {
+        const cgltf_attribute* attribute = &prim->attributes[attr];
+        accessor = attribute->data;
+        if (attribute->type == cgltf_attribute_type_position)
+        {
+            assert(accessor->type == cgltf_type_vec3
+                && accessor->component_type == cgltf_component_type_r_32f);
+            LoadAttribute(accessor, positions, 3);
+        }
+        else if (attribute->type == cgltf_attribute_type_normal)
+        {
+            assert(accessor->type == cgltf_type_vec3
+                && accessor->component_type == cgltf_component_type_r_32f);
+            LoadAttribute(accessor, normals, 3);
+        }
+        else if (attribute->type == cgltf_attribute_type_joints)
+        {
+            assert(accessor->type == cgltf_type_vec4
+                && accessor->component_type == cgltf_component_type_r_8u);
+            LoadAttribute(accessor, joints, 4);
+        }
+        else if (attribute->type == cgltf_attribute_type_weights)
+        {
+            assert(accessor->type == cgltf_type_vec4
+                && accessor->component_type == cgltf_component_type_r_32f);
+            LoadAttribute(accessor, weights, 4);
+        }
+    }
+
+    if (prim->indices != nullptr)
+    {
+        accessor = prim->indices;
+        LoadAttribute(accessor, &indices[0], 1);
+    }
+
+    const cgltf_skin* skin = &data->skins[0];
+    Matrix*           inverse_bind_matrices = new Matrix[skin->joints_count];
+
+    for (uint32_t i = 0; i < skin->joints_count; ++i)
+    {
+        printf("joint %d: %s\n", i, skin->joints[i]->name);
+        cgltf_node* node = skin->joints[i];
+        skin->inverse_bind_matrices[i];
+    }
+
+    // struct buffer positions_buf = load_file("positions.bin", &buf);
+    // struct buffer normals_buf = load_file("normals.bin", &buf);
+    // struct buffer index_buf = load_file("indices.bin", &buf);
+    // struct buffer vert_joints_buf = load_file("vert_joints.bin", &buf);
+    // struct buffer vert_weights_buf = load_file("vert_weights.bin", &buf);
+    // struct buffer nodes_buf = load_file("nodes.bin", &buf);
+    // struct buffer joint_info_buf = load_file("joint_info.bin", &buf);
 
     GLuint vertex_array;
     glGenVertexArrays(1, &vertex_array);
@@ -174,7 +360,8 @@ struct model load_model(struct buffer buf)
     GLuint position_buffer;
     glGenBuffers(1, &position_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, position_buffer);
-    glBufferData(GL_ARRAY_BUFFER, positions_buf.len, positions_buf.data, GL_STATIC_DRAW);
+    // glBufferData(GL_ARRAY_BUFFER, positions_buf.len, positions_buf.data, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, numVertices * sizeof(float) * 3, positions, GL_STATIC_DRAW);
 
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
@@ -182,7 +369,8 @@ struct model load_model(struct buffer buf)
     GLuint normals_buffer;
     glGenBuffers(1, &normals_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, normals_buffer);
-    glBufferData(GL_ARRAY_BUFFER, normals_buf.len, normals_buf.data, GL_STATIC_DRAW);
+    // glBufferData(GL_ARRAY_BUFFER, normals_buf.len, normals_buf.data, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, numVertices * sizeof(float) * 3, normals, GL_STATIC_DRAW);
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), 0);
@@ -190,7 +378,8 @@ struct model load_model(struct buffer buf)
     GLuint joints_buffer;
     glGenBuffers(1, &joints_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, joints_buffer);
-    glBufferData(GL_ARRAY_BUFFER, vert_joints_buf.len, vert_joints_buf.data, GL_STATIC_DRAW);
+    //    glBufferData(GL_ARRAY_BUFFER, vert_joints_buf.len, vert_joints_buf.data, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(uint8_t) * 4 * numVertices, joints, GL_STATIC_DRAW);
 
     glEnableVertexAttribArray(2);
     glVertexAttribIPointer(2, 4, GL_UNSIGNED_BYTE, 4, 0);
@@ -198,7 +387,9 @@ struct model load_model(struct buffer buf)
     GLuint weights_buffer;
     glGenBuffers(1, &weights_buffer);
     glBindBuffer(GL_ARRAY_BUFFER, weights_buffer);
-    glBufferData(GL_ARRAY_BUFFER, vert_weights_buf.len, vert_weights_buf.data, GL_STATIC_DRAW);
+    //    glBufferData(GL_ARRAY_BUFFER, vert_weights_buf.len, vert_weights_buf.data,
+    //    GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * numVertices, weights, GL_STATIC_DRAW);
 
     glEnableVertexAttribArray(3);
     glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), 0);
@@ -206,37 +397,10 @@ struct model load_model(struct buffer buf)
     GLuint ebo;
     glGenBuffers(1, &ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf.len, index_buf.data, GL_STATIC_DRAW);
+    // glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_buf.len, index_buf.data, GL_STATIC_DRAW);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(uint16_t) * numIndices, indices, GL_STATIC_DRAW);
 
     glBindVertexArray(0);
-
-    // 3 floats translation
-    // 4 floats rotation
-    // 3 floats scale
-    // 1 uint32 parent
-#define ELEMS_PER_NODE (11)
-#define NODE_SIZE (ELEMS_PER_NODE * 4)
-
-    size_t       num_nodes = nodes_buf.len / NODE_SIZE;
-    struct node* nodes = (node*)malloc(num_nodes * NODE_SIZE);
-
-    float*    nodes_float = (float*)nodes_buf.data;
-    uint32_t* nodes_u = (uint32_t*)nodes_buf.data;
-
-    for (int i = 0; i < nodes_buf.len / NODE_SIZE; ++i)
-    {
-        nodes[i].translation[0] = nodes_float[ELEMS_PER_NODE * i];
-        nodes[i].translation[1] = nodes_float[ELEMS_PER_NODE * i + 1];
-        nodes[i].translation[2] = nodes_float[ELEMS_PER_NODE * i + 2];
-        nodes[i].rotation[0] = nodes_float[ELEMS_PER_NODE * i + 3];
-        nodes[i].rotation[1] = nodes_float[ELEMS_PER_NODE * i + 4];
-        nodes[i].rotation[2] = nodes_float[ELEMS_PER_NODE * i + 5];
-        nodes[i].rotation[3] = nodes_float[ELEMS_PER_NODE * i + 6];
-        nodes[i].scale[0] = nodes_float[ELEMS_PER_NODE * i + 7];
-        nodes[i].scale[1] = nodes_float[ELEMS_PER_NODE * i + 8];
-        nodes[i].scale[2] = nodes_float[ELEMS_PER_NODE * i + 9];
-        nodes[i].parent = nodes_u[ELEMS_PER_NODE * i + 10];
-    }
 
     size_t                    num_animations = 29;
     struct animation_channel* animations
@@ -286,36 +450,24 @@ struct model load_model(struct buffer buf)
         };
     }
 
-    uint32_t  num_joints = *(uint32_t*)joint_info_buf.data;
-    uint32_t* joint_ids = new uint32_t[num_joints];
-    Matrix*   inverse_bind_matrices = new Matrix[num_joints];
-
-    uint32_t cursor = 4;
-    for (int i = 0; i < num_joints; ++i)
+    uint32_t* joint_ids = new uint32_t[skin->joints_count];
+    for (int i = 0; i < skin->joints_count; ++i)
     {
-        joint_ids[i] = *(((uint32_t*)(joint_info_buf.data + cursor)));
-        printf("joint: %d\n", joint_ids[i]);
-        cursor += 4;
+        cgltf_node* joint = skin->joints[i];
+        uint32_t    joint_id = (ptrdiff_t)(joint - data->nodes);
+        joint_ids[i] = joint_id;
     }
 
-    for (int i = 0; i < num_joints; ++i)
+    float* inverse_bind_matrices_buf = new float[skin->joints_count * 16];
+    LoadAttribute(skin->inverse_bind_matrices, inverse_bind_matrices_buf, 16);
+
+    for (int i = 0; i < skin->joints_count; ++i)
     {
-        printf("hi mom\n");
-        memcpy(&inverse_bind_matrices[i], joint_info_buf.data + cursor, 4 * 16);
-        // inverse_bind_matrices[i] = *(((struct mat4x4*)joint_info_buf.data +
-        // cursor));
-        inverse_bind_matrices[i] = inverse_bind_matrices[i];
-        for (int j = 0; j < 16; ++j)
-        {
-            if (j % 4 == 0)
-                printf("\n");
-            printf("%f ", inverse_bind_matrices[i].m[j]);
-        }
-        cursor += 4 * 16;
+        inverse_bind_matrices[i] = Matrix(inverse_bind_matrices_buf + (i * 16));
     }
 
-    return (struct model) { vertex_array, index_buf.len / 2, nodes, num_nodes, animations,
-        num_animations, joint_ids, inverse_bind_matrices, num_joints };
+    return (struct model) { data, vertex_array, (size_t)numIndices, data->nodes_count, animations,
+        num_animations, skin->joints, joint_ids, inverse_bind_matrices, skin->joints_count };
 }
 
 GLuint compile_shader(const char* shader_text, GLenum shader_type)
@@ -364,22 +516,57 @@ GLuint make_bone(void)
     return vertex_array;
 }
 
-Matrix node_world_txfm(struct node* nodes, size_t idx)
+// Matrix node_world_txfm2(const gltf_node* joint)
+//{
+//     if (joint == nullptr)
+//     {
+//         return {};
+//     }
+//     Vector3 scale = Vector3(joint->scale[0], joint->scale[1], joint->scale[2]);
+//     Vector3 translation
+//         = Vector3(joint->translation[0], joint->translation[1], joint->translation[2]);
+//     Quaternion rotation = Quaternion(
+//         joint->rotation[0], joint->rotation[1], joint->rotation[2], joint->rotation[3]);
+//
+//     Matrix node_txfm = Matrix::CreateScale(scale);
+//     node_txfm *= Matrix::CreateFromQuaternion(rotation);
+//     node_txfm *= Matrix::CreateTranslation(translation);
+//
+//     if (joint->parent != nullptr)
+//     {
+//         node_txfm *= node_world_txfm2(joint->parent);
+//     }
+// }
+
+Matrix node_world_txfm(cgltf_node* node)
 {
-
-    struct node node = nodes[idx];
-    Matrix      node_txfm = Matrix::CreateScale(node.scale[0], node.scale[1], node.scale[2]);
-
+    Vector3 scale = Vector3(node->scale[0], node->scale[1], node->scale[2]);
+    Vector3 translation = Vector3(node->translation[0], node->translation[1], node->translation[2]);
     Quaternion rotation
-        = Quaternion(node.rotation[0], node.rotation[1], node.rotation[2], node.rotation[3]);
+        = Quaternion(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
+
+    Matrix node_txfm = Matrix::CreateScale(scale);
     node_txfm *= Matrix::CreateFromQuaternion(rotation);
+    node_txfm *= Matrix::CreateTranslation(translation);
 
-    node_txfm
-        *= Matrix::CreateTranslation(node.translation[0], node.translation[1], node.translation[2]);
-
-    if (node.parent != UINT32_MAX)
+    if (node->parent != nullptr)
     {
-        node_txfm *= node_world_txfm(nodes, node.parent);
+        node_txfm *= node_world_txfm(node->parent);
+    }
+
+    return node_txfm;
+}
+
+Matrix node_world_txfm(gltf_node* node)
+{
+    // struct node node = nodes[idx];
+    Matrix node_txfm = Matrix::CreateScale(node->scale);
+    node_txfm *= Matrix::CreateFromQuaternion(node->rotation);
+    node_txfm *= Matrix::CreateTranslation(node->translation);
+
+    if (node->parent != nullptr)
+    {
+        node_txfm *= node_world_txfm(node->parent);
     }
 
     return node_txfm;
@@ -424,184 +611,237 @@ void apply_animation(float time_since_start, struct model* model)
                 (rel_time_since_start - last_time) / (next_time - last_time));
         }
 
-        struct node* node = &model->nodes[channel->target];
+        cgltf_node* nodes = model->model_data->nodes;
         switch (channel->animation_type)
         {
         case animation_type_translation:
-            node->translation[0] = out[0];
-            node->translation[1] = out[1];
-            node->translation[2] = out[2];
+            nodes[channel->target].translation[0] = out[0];
+            nodes[channel->target].translation[1] = out[1];
+            nodes[channel->target].translation[2] = out[2];
             break;
         case animation_type_rotation:
-            node->rotation[0] = out[0];
-            node->rotation[1] = out[1];
-            node->rotation[2] = out[2];
-            node->rotation[3] = out[3];
+            nodes[channel->target].rotation[0] = out[0];
+            nodes[channel->target].rotation[1] = out[1];
+            nodes[channel->target].rotation[2] = out[2];
+            nodes[channel->target].rotation[3] = out[3];
             break;
         case animation_type_scale:
-            node->scale[0] = out[0];
-            node->scale[1] = out[1];
-            node->scale[2] = out[2];
+            nodes[channel->target].scale[0] = out[0];
+            nodes[channel->target].scale[1] = out[1];
+            nodes[channel->target].scale[2] = out[2];
+
             break;
         }
     }
 }
 
-int main(void)
+struct SDLWindowDeleter
+{
+    void operator()(SDL_Window* window) const
+    {
+        if (window)
+        {
+            SDL_DestroyWindow(window);
+        }
+        window = nullptr;
+    }
+};
+using SDLWindowPtr = std::unique_ptr<SDL_Window, SDLWindowDeleter>;
+
+struct App
+{
+    SDLWindowPtr  window;
+    SDL_GLContext context;
+    buffer        skeleton;
+    model         model;
+    GLuint        bone_vao;
+    GLuint        vertex_shader;
+    GLuint        fragment_shader;
+    GLuint        program;
+    GameTimer     timer;
+    float         angle;
+};
+
+SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
 
-    glfwSetErrorCallback(error_callback);
-
-    if (!glfwInit())
-        exit(EXIT_FAILURE);
-
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-    GLFWwindow* window = glfwCreateWindow(500, 500, "OpenGL Triangle", NULL, NULL);
-    if (!window)
+    // SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "waitevent");
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
     {
-        glfwTerminate();
-        exit(EXIT_FAILURE);
+        SDL_LogError(
+            SDL_LOG_CATEGORY_APPLICATION, "Failed to initialize SDL: %s\n", SDL_GetError());
+        return SDL_APP_FAILURE;
     }
 
-    glfwMakeContextCurrent(window);
-    glfwSwapInterval(1);
-
-    GLenum err = glewInit();
-    if (GLEW_OK != err)
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    App* app = new App;
+    app->window.reset(
+        SDL_CreateWindow("OpenGL Triangle", 800, 600, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE));
+    if (!app->window)
     {
-        glfwTerminate();
-        fprintf(stderr, "Failed to init GLEW\n");
-        exit(EXIT_FAILURE);
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to create window: %s\n", SDL_GetError());
+        return SDL_APP_FAILURE;
     }
 
-    // NOTE: OpenGL error checks have been omitted for brevity
-
-    struct buffer buf = { new char[10 * 1024 * 1024], 10 * 1024 * 1024 };
-    struct model  model = load_model(buf);
-
-    for (int i = 0; i < model.num_nodes; ++i)
+    app->context = SDL_GL_CreateContext(app->window.get());
+    if (!app->context)
     {
-        printf("%f %f %f (%d)\n", model.nodes[i].translation[0], model.nodes[i].translation[1],
-            model.nodes[i].translation[2], model.nodes[i].parent);
+        SDL_LogError(
+            SDL_LOG_CATEGORY_APPLICATION, "Failed to create OpenGL context: %s\n", SDL_GetError());
+        return SDL_APP_FAILURE;
     }
 
-    const GLuint vertex_shader = compile_shader(vertex_shader_text, GL_VERTEX_SHADER);
-    const GLuint fragment_shader = compile_shader(fragment_shader_text, GL_FRAGMENT_SHADER);
+    if (!gladLoadGLLoader(reinterpret_cast<GLADloadproc>(SDL_GL_GetProcAddress)))
+    {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to init GLAD");
+        return SDL_APP_FAILURE;
+    }
+    std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
 
-    const GLuint program = glCreateProgram();
-    glAttachShader(program, vertex_shader);
-    glAttachShader(program, fragment_shader);
-    glLinkProgram(program);
+    SDL_GL_MakeCurrent(app->window.get(), app->context);
+    SDL_GL_SwapWindow(app->window.get());
 
-    // GLuint vertex_buffer;
-    // glGenBuffers(1, &vertex_buffer);
-    // glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
-    // glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices,
-    // GL_STATIC_DRAW);
+    app->skeleton = { new char[10 * 1024 * 1024], 10 * 1024 * 1024 };
+    app->model = load_model(app->skeleton);
 
-    // GLuint vertex_array;
-    // glGenVertexArrays(1, &vertex_array);
-    // glBindVertexArray(vertex_array);
-    // glEnableVertexAttribArray(1);
-    // glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
-    //                       sizeof(Vertex), (void*) offsetof(Vertex, pos));
-    // glEnableVertexAttribArray(0);
-    // glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-    //                       sizeof(Vertex), (void*) offsetof(Vertex, col));
+    app->vertex_shader = compile_shader(vertex_shader_text, GL_VERTEX_SHADER);
+    app->fragment_shader = compile_shader(fragment_shader_text, GL_FRAGMENT_SHADER);
 
-    // GLuint ebo;
-    // glGenBuffers(1, &ebo);
-    // glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    // glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices,
-    // GL_STATIC_DRAW);
+    app->program = glCreateProgram();
+    glAttachShader(app->program, app->vertex_shader);
+    glAttachShader(app->program, app->fragment_shader);
+    glLinkProgram(app->program);
 
-    float angle = 0;
+    app->angle = 0;
 
-    GLuint bone_vao = make_bone();
-
-    struct timespec last;
-    clock_gettime(CLOCK_MONOTONIC, &last);
-    struct timespec start = last;
+    app->bone_vao = make_bone();
 
     glEnable(GL_DEPTH_TEST);
 
     glLineWidth(5);
 
-    while (!glfwWindowShouldClose(window))
+    app->timer.setFixedTimeStep(false);
+
+    *appstate = app;
+
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void* appstate)
+{
+    App* app = static_cast<App*>(appstate);
+    if (app)
     {
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
+        app->timer.tick([&] {
+            float elapsed = app->timer.elapsedSeconds();
 
-        float delta_s = diff_time(last, now);
-        apply_animation(diff_time(start, now), &model);
+            static float accum = 0.0f;
+            accum += elapsed;
+            apply_animation(accum, &app->model);
 
-        angle += 2.0f * M_PI * delta_s * 0.5;
-        angle = fmod(angle, 2 * M_PI);
+            app->angle += 2.0f * M_PI * elapsed * 0.5;
+            app->angle = fmod(app->angle, 2 * M_PI);
 
-        int width, height;
-        glfwGetFramebufferSize(window, &width, &height);
-        const float ratio = width / (float)height;
+            int width, height;
+            SDL_GetWindowSizeInPixels(app->window.get(), &width, &height);
+            const float ratio = width / (float)height;
 
-        glViewport(0, 0, width, height);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glViewport(0, 0, width, height);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        glUseProgram(program);
-        glBindVertexArray(model.vao);
+            glUseProgram(app->program);
+            glBindVertexArray(app->model.vao);
 
-        Matrix world_txfm = Matrix::CreateTranslation(0, -0.0, 0.0);
-        world_txfm *= Matrix::CreateRotationY(angle);
-        world_txfm *= Matrix::CreateTranslation(0.0, 0.0, -1.0);
-        world_txfm = world_txfm.Transpose();
+            Matrix world_txfm = Matrix::CreateTranslation(0, -0.0, 0.0);
+            world_txfm *= Matrix::CreateRotationY(app->angle);
+            world_txfm *= Matrix::CreateTranslation(0.0, 0.0, -1.0);
+            world_txfm = world_txfm.Transpose();
 
-        Matrix viewport_txfm = Matrix::CreatePerspectiveFieldOfView(XMConvertToRadians(90.0f), ratio, 0.1f, 10.0f);
-        viewport_txfm = viewport_txfm.Transpose();
+            Matrix viewport_txfm = Matrix::CreatePerspectiveFieldOfView(
+                XMConvertToRadians(90.0f), ratio, 0.1f, 10.0f);
+            viewport_txfm = viewport_txfm.Transpose();
 
-        Matrix bone_matrices[20];
-        Matrix inverse_bone_matrices[20];
-        for (int i = 0; i < model.num_joints; i++)
-        {
-            inverse_bone_matrices[i] = model.joint_inverse_mats[i];
-            inverse_bone_matrices[i] = inverse_bone_matrices[i].Transpose();
-            bone_matrices[i] = node_world_txfm(model.nodes, model.joint_ids[i]);
-            bone_matrices[i] = bone_matrices[i].Transpose();
-            // bone_matrices[i] = mat4x4_translate(0, 0, 0);
-        }
+            Matrix bone_matrices[20];
+            Matrix inverse_bone_matrices[20];
+            for (int i = 0; i < app->model.num_joints; i++)
+            {
+                inverse_bone_matrices[i] = app->model.joint_inverse_mats[i];
+                inverse_bone_matrices[i] = inverse_bone_matrices[i].Transpose();
+                // bone_matrices[i]
+                //   = node_world_txfm2(app->model.skin->joints[app->model.joint_ids[i]]);
+                //                bone_matrices[i] =
+                //                node_world_txfm(app->model.gltf_nodes[app->model.joint_ids[i]]);
+                bone_matrices[i]
+                    = node_world_txfm(&app->model.model_data->nodes[app->model.joint_ids[i]]);
+                bone_matrices[i] = bone_matrices[i].Transpose();
+                // bone_matrices[i] = mat4x4_translate(0, 0, 0);
+            }
 
-        GLuint world_txfm_loc = glGetUniformLocation(program, "world_txfm");
-        GLuint viewport_txfm_loc = glGetUniformLocation(program, "viewport_txfm");
-        GLuint preview_joint_loc = glGetUniformLocation(program, "preview_joint");
-        GLuint inverse_bone_matrix_loc = glGetUniformLocation(program, "inverse_bone_matrix");
-        GLuint bone_matrix_loc = glGetUniformLocation(program, "bone_matrix");
+            GLuint world_txfm_loc = glGetUniformLocation(app->program, "world_txfm");
+            GLuint viewport_txfm_loc = glGetUniformLocation(app->program, "viewport_txfm");
+            GLuint preview_joint_loc = glGetUniformLocation(app->program, "preview_joint");
+            GLuint inverse_bone_matrix_loc
+                = glGetUniformLocation(app->program, "inverse_bone_matrix");
+            GLuint bone_matrix_loc = glGetUniformLocation(app->program, "bone_matrix");
 
-        glUniformMatrix4fv(world_txfm_loc, 1, true, reinterpret_cast<float*>(&world_txfm));
-        glUniformMatrix4fv(viewport_txfm_loc, 1, true, reinterpret_cast<float*>(&viewport_txfm));
-        glUniformMatrix4fv(
-            inverse_bone_matrix_loc, 20, true, reinterpret_cast<float*>(&inverse_bone_matrices));
-        glUniformMatrix4fv(bone_matrix_loc, 20, true, reinterpret_cast<float*>(&bone_matrices));
+            glUniformMatrix4fv(world_txfm_loc, 1, true, reinterpret_cast<float*>(&world_txfm));
+            glUniformMatrix4fv(
+                viewport_txfm_loc, 1, true, reinterpret_cast<float*>(&viewport_txfm));
+            glUniformMatrix4fv(inverse_bone_matrix_loc, 20, true,
+                reinterpret_cast<float*>(&inverse_bone_matrices));
+            glUniformMatrix4fv(bone_matrix_loc, 20, true, reinterpret_cast<float*>(&bone_matrices));
 
-        glDrawElements(GL_TRIANGLES, model.num_indices, GL_UNSIGNED_SHORT, 0);
+            glDrawElements(GL_TRIANGLES, app->model.num_indices, GL_UNSIGNED_SHORT, 0);
 
-        glBindVertexArray(bone_vao);
+            glBindVertexArray(app->bone_vao);
 
-        for (int i = 0; i < model.num_nodes; i++)
-        {
-            Matrix bone_txfm = node_world_txfm(model.nodes, i);
-            bone_txfm *= world_txfm;
-            glUniformMatrix4fv(preview_joint_loc, 1, true, reinterpret_cast<float*>(&bone_txfm));
-            glDrawArrays(GL_LINES, 0, 2);
-        }
+            for (int i = 0; i < app->model.num_nodes; i++)
+            {
+                // Matrix bone_txfm = node_world_txfm2(app->model.skin->joints[i]);
+                // Matrix bone_txfm = node_world_txfm(app->model.gltf_nodes[i]);
+                //  Matrix bone_txfm = node_world_txfm(app->model.nodes, i);
+                Matrix bone_txfm = node_world_txfm(&app->model.model_data->nodes[i]);
 
-        glfwSwapBuffers(window);
-        glfwPollEvents();
+                bone_txfm *= world_txfm;
+                glUniformMatrix4fv(
+                    preview_joint_loc, 1, true, reinterpret_cast<float*>(&bone_txfm));
+                glDrawArrays(GL_LINES, 0, 2);
+            }
 
-        last = now;
+            SDL_GL_SwapWindow(app->window.get());
+        });
     }
 
-    glfwDestroyWindow(window);
+    return SDL_APP_CONTINUE;
+}
 
-    glfwTerminate();
-    exit(EXIT_SUCCESS);
+SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
+{
+    App* app = static_cast<App*>(appstate);
+    switch (event->type)
+    {
+    case SDL_EVENT_TERMINATING:
+    case SDL_EVENT_QUIT: {
+        // game->quit();
+        return SDL_APP_SUCCESS;
+
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+        // game->onKeyEvent(event);
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void* appstate, SDL_AppResult result)
+{
+    App* app = static_cast<App*>(appstate);
+    delete app;
 }
