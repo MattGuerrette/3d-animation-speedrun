@@ -1,11 +1,12 @@
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.31)
 project(3DAnimation)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(FetchExternal)
 
-option(USE_OPENGL "Use OpenGL for rendering" OFF)
+option(USE_OPENGL "Use OpenGL for rendering" ON)
 if (APPLE)
+    set(USE_OPENGL OFF)
     # On macOS, we need to use Metal for rendering as OpenGL is deprecated.
     option(USE_METAL "Use Metal for rendering" ON)
 endif()
