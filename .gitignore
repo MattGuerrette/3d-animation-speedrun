@@ -1,2 +1,5 @@
 *.bin
 cmake-build*
+out
+.vs
+.idea

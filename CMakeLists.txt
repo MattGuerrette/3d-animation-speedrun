@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.31)
 project(3DAnimation)
 
+set(CMAKE_CXX_STANDARD 20)
+
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(FetchExternal)
 
@@ -45,7 +47,10 @@ add_executable(${PROJECT_NAME} MACOSX_BUNDLE
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
     ${RESOURCE_FILES})
-target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3-static fmt::fmt)
+target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3 fmt::fmt)
+
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/alien-bug.glb $<TARGET_FILE_DIR:${PROJECT_NAME}>)
 
 if (USE_OPENGL)
     target_link_libraries(${PROJECT_NAME} PRIVATE glad::glad OpenGL::GL)

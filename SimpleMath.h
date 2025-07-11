@@ -12,6 +12,8 @@
 
 #include <cstdint>
 
+
+#ifndef _WIN32
 typedef uint32_t UINT;
 
 typedef int32_t LONG;
@@ -23,6 +25,7 @@ typedef struct RECT
 	long top;
 	long bottom;
 } RECT;
+#endif
 
 #if (defined(_WIN32) || defined(WINAPI_FAMILY)) && !(defined(_XBOX_ONE) && defined(_TITLE)) && !defined(_GAMING_XBOX)
 #include <dxgi1_2.h>

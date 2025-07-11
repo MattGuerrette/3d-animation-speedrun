@@ -55,12 +55,12 @@ typedef struct Vertex
 
 struct gltf_node
 {
-    Vector3    translation;
-    Vector3    scale;
-    Quaternion rotation;
-    int        idx;
-    gltf_node* parent;
-    int        parentIdx;
+    DirectX::SimpleMath::Vector3    translation;
+    DirectX::SimpleMath::Vector3    scale;
+    DirectX::SimpleMath::Quaternion rotation;
+    int                             idx;
+    gltf_node*                      parent;
+    int                             parentIdx;
 };
 
 static const char* vertex_shader_text
@@ -401,7 +401,7 @@ struct model load_model()
             float* data = new float[num_timesteps * components];
             LoadAttribute(channel->sampler->output, data, components);
 
-            animations[i].channels[j] = (struct animation_channel) {
+            animations[i].channels[j] = {
                 target_node,
                 target_path,
                 num_timesteps,
@@ -1019,8 +1019,8 @@ SDL_AppResult SDL_AppIterate(void* appstate)
             accum += elapsed;
             apply_animation(accum, &app->model, app->animation_idx);
 
-            app->angle += 2.0f * M_PI * elapsed * 0.5;
-            app->angle = fmod(app->angle, 2 * M_PI);
+            app->angle += 2.0f * DirectX::XM_PI * elapsed * 0.5;
+            app->angle = fmod(app->angle, 2 * DirectX::XM_PI);
 
 #ifdef USE_OPENGL
             app->render_opengl();
