@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <vector>
 
 #include "File.hpp"
 #include "GameTimer.hpp"
@@ -46,22 +47,6 @@ using namespace DirectX::SimpleMath;
 
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
-
-typedef struct Vertex
-{
-    float pos[3];
-    float col[3];
-} Vertex;
-
-struct gltf_node
-{
-    DirectX::SimpleMath::Vector3    translation;
-    DirectX::SimpleMath::Vector3    scale;
-    DirectX::SimpleMath::Quaternion rotation;
-    int                             idx;
-    gltf_node*                      parent;
-    int                             parentIdx;
-};
 
 static const char* vertex_shader_text
     = "#version 410\n"
@@ -115,35 +100,18 @@ static float diff_time(struct timespec last, struct timespec now)
     return ret;
 }
 
-struct node
-{
-    float    translation[3];
-    float    rotation[4];
-    float    scale[3];
-    uint32_t parent;
-};
-
-enum animation_type : uint32_t
-{
-    animation_type_translation = 0,
-    animation_type_rotation = 1,
-    animation_type_scale = 2,
-};
-
-struct animation
-{
-    std::string               name;
-    struct animation_channel* channels;
-    size_t                    num_channels;
-};
-
 struct animation_channel
 {
     uint32_t                  target;
     cgltf_animation_path_type path_type;
-    size_t                    num_timesteps;
-    float*                    times;
-    float*                    data;
+    std::vector<float>        times;
+    std::vector<float>        data;
+};
+
+struct animation
+{
+    std::string                    name;
+    std::vector<animation_channel> channels;
 };
 
 int animation_channel_components(cgltf_animation_path_type path_type)
@@ -160,15 +128,13 @@ int animation_channel_components(cgltf_animation_path_type path_type)
 
 struct model
 {
-    cgltf_data*  model_data;
-    size_t       num_indices;
-    size_t       num_nodes;
-    animation*   animations;
-    size_t       num_animations;
-    cgltf_node** joints;
-    uint32_t*    joint_ids;
-    Matrix*      joint_inverse_mats;
-    size_t       num_joints;
+    cgltf_data*            model_data;
+    size_t                 num_indices;
+    size_t                 num_nodes;
+    std::vector<animation> animations;
+    cgltf_node**           joints;
+    uint32_t*              joint_ids;
+    std::vector<Matrix>    joint_inverse_mats;
 
 #ifdef USE_OPENGL
     GLuint vao;
@@ -230,24 +196,6 @@ void calculate_vertex_info(const cgltf_primitive* primitive, int* numVertices, i
             *numVertices += attribute->data->count;
         }
     }
-}
-
-gltf_node* build_node(cgltf_data* data, cgltf_node* node)
-{
-    gltf_node* g_node = new gltf_node;
-    g_node->translation = Vector3(node->translation[0], node->translation[1], node->translation[2]);
-    g_node->scale = Vector3(node->scale[0], node->scale[1], node->scale[2]);
-    g_node->rotation
-        = Quaternion(node->rotation[0], node->rotation[1], node->rotation[2], node->rotation[3]);
-    g_node->idx = (ptrdiff_t)(node - data->nodes);
-
-    if (node->parent != nullptr)
-    {
-        g_node->parent = build_node(data, node->parent);
-        g_node->parentIdx = (ptrdiff_t)(node->parent - data->nodes);
-    }
-
-    return g_node;
 }
 
 struct model load_model()
@@ -317,8 +265,8 @@ struct model load_model()
         LoadAttribute(accessor, &indices[0], 1);
     }
 
-    const cgltf_skin* skin = &data->skins[0];
-    Matrix*           inverse_bind_matrices = new Matrix[skin->joints_count];
+    const cgltf_skin*   skin = &data->skins[0];
+    std::vector<Matrix> inverse_bind_matrices(skin->joints_count);
 
     for (uint32_t i = 0; i < skin->joints_count; ++i)
     {
@@ -372,15 +320,13 @@ struct model load_model()
     glBindVertexArray(0);
 #endif
 
-    animation* animations = new animation[data->animations_count];
+    std::vector<animation> animations(data->animations_count);
     for (uint32_t i = 0; i < data->animations_count; ++i)
     {
         const cgltf_animation* animation = &data->animations[i];
         animations[i].name = animation->name ? animation->name : "Unnamed Animation";
 
-        animations[i].channels = (animation_channel*)malloc(
-            animation->channels_count * sizeof(struct animation_channel));
-        animations[i].num_channels = animation->channels_count;
+        animations[i].channels.resize(animation->channels_count);
         for (uint32_t j = 0; j < animation->channels_count; ++j)
         {
             const cgltf_animation_channel* channel = &animation->channels[j];
@@ -388,9 +334,9 @@ struct model load_model()
             uint32_t                  target_node = (ptrdiff_t)(channel->target_node - data->nodes);
             cgltf_animation_path_type target_path = channel->target_path;
 
-            cgltf_size num_timesteps = channel->sampler->input->count;
-            float*     times = new float[channel->sampler->input->count];
-            LoadAttribute(channel->sampler->input, times, 1);
+            cgltf_size         num_timesteps = channel->sampler->input->count;
+            std::vector<float> times(channel->sampler->input->count);
+            LoadAttribute(channel->sampler->input, times.data(), 1);
 
             int components = 3;
             if (target_path == cgltf_animation_path_type_rotation)
@@ -398,13 +344,12 @@ struct model load_model()
                 components = 4;
             }
 
-            float* data = new float[num_timesteps * components];
-            LoadAttribute(channel->sampler->output, data, components);
+            std::vector<float> data(num_timesteps * components);
+            LoadAttribute(channel->sampler->output, data.data(), components);
 
-            animations[i].channels[j] = {
+            animations[i].channels[j] = animation_channel {
                 target_node,
                 target_path,
-                num_timesteps,
                 times,
                 data,
             };
@@ -432,14 +377,19 @@ struct model load_model()
     model.num_indices = (size_t)numIndices;
     model.num_nodes = (size_t)data->nodes_count;
     model.animations = animations;
-    model.num_animations = data->animations_count;
     model.joints = skin->joints;
     model.joint_ids = joint_ids;
     model.joint_inverse_mats = inverse_bind_matrices;
-    model.num_joints = skin->joints_count;
 #ifdef USE_OPENGL
     model.vao = vertex_array;
 #endif
+
+    delete[] positions;
+    delete[] normals;
+    delete[] joints;
+    delete[] weights;
+    delete[] indices;
+    delete[] inverse_bind_matrices_buf;
 
     return model;
 }
@@ -511,21 +461,6 @@ Matrix node_world_txfm(cgltf_node* node)
     return node_txfm;
 }
 
-Matrix node_world_txfm(gltf_node* node)
-{
-    // struct node node = nodes[idx];
-    Matrix node_txfm = Matrix::CreateScale(node->scale);
-    node_txfm *= Matrix::CreateFromQuaternion(node->rotation);
-    node_txfm *= Matrix::CreateTranslation(node->translation);
-
-    if (node->parent != nullptr)
-    {
-        node_txfm *= node_world_txfm(node->parent);
-    }
-
-    return node_txfm;
-}
-
 float lerp(float a, float b, float t)
 {
     return a * (1.0 - t) + b * t;
@@ -533,25 +468,25 @@ float lerp(float a, float b, float t)
 
 void apply_animation(float time_since_start, struct model* model, int index)
 {
-    assert(index < model->num_animations);
+    assert(index < model->animations.size());
 
     animation* animation = &model->animations[index];
 
-    for (int channel_idx = 0; channel_idx < animation->num_channels; ++channel_idx)
+    for (int channel_idx = 0; channel_idx < animation->channels.size(); ++channel_idx)
     {
         struct animation_channel* channel = &animation->channels[channel_idx];
         float                     rel_time_since_start
-            = fmod(time_since_start, channel->times[channel->num_timesteps - 1]);
+            = fmod(time_since_start, channel->times[channel->times.size() - 1]);
 
         int last_timestep = 0;
-        for (int i = 0; i < channel->num_timesteps; ++i)
+        for (int i = 0; i < channel->times.size(); ++i)
         {
             if (rel_time_since_start < channel->times[i])
                 break;
             last_timestep = i;
         }
 
-        int next_timestep = (last_timestep + 1) % channel->num_timesteps;
+        int next_timestep = (last_timestep + 1) % channel->times.size();
 
         float last_time = channel->times[last_timestep];
         float next_time = channel->times[next_timestep];
@@ -683,7 +618,7 @@ void App::render_opengl()
 
     Matrix bone_matrices[72];
     Matrix inverse_bone_matrices[72];
-    for (int i = 0; i < model.num_joints; i++)
+    for (int i = 0; i < model.joint_inverse_mats.size(); i++)
     {
         inverse_bone_matrices[i] = model.joint_inverse_mats[i];
         inverse_bone_matrices[i] = inverse_bone_matrices[i].Transpose();
@@ -725,7 +660,7 @@ void App::render_opengl()
                 animation* animations = static_cast<animation*>(data);
                 return animations[index].name.c_str();
             },
-            model.animations, model.num_animations))
+            model.animations.data(), model.animations.size()))
     {
     }
     ImGui::PopStyleVar();

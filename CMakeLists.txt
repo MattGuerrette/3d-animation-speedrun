@@ -32,7 +32,7 @@ list(APPEND RESOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/guy.glb)
 list(APPEND RESOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/guy.gltf)
 list(APPEND RESOURCE_FILES ${CMAKE_CURRENT_SOURCE_DIR}/alien-bug.glb)
 
-add_executable(${PROJECT_NAME} MACOSX_BUNDLE
+add_executable(${PROJECT_NAME} WIN32 MACOSX_BUNDLE
     main.cpp
     GameTimer.hpp
     GameTimer.cpp
